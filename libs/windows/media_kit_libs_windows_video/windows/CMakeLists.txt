@@ -67,16 +67,16 @@ endfunction()
 # Detect architecture and set appropriate libmpv archive
 if(${FLUTTER_TARGET_PLATFORM} STREQUAL "windows-x64")
   set(LIBMPV_ARCH "x86_64")
-  set(LIBMPV "mpv-dev-x86_64-20260211-git-3847a81.7z")
-  set(LIBMPV_MD5 "f93d96ea588d4efe911769fb02b2c226")
+  set(LIBMPV "mpv-dev-x86_64-20260419-git-06f4ce7.7z")
+  set(LIBMPV_MD5 "8b2554f13488f34e09cdc520c6e7a38f")
 else()
   set(LIBMPV_ARCH "aarch64")
-  set(LIBMPV "mpv-dev-aarch64-20260211-git-3847a81.7z")
-  set(LIBMPV_MD5 "3bd02b4aec870bf3724d2b1c25963cb6")
+  set(LIBMPV "mpv-dev-aarch64-20260419-git-06f4ce7.7z")
+  set(LIBMPV_MD5 "6875d06a0faa2cbb47b3ee070922a87e")
 endif()
 
 # Download URL for the libmpv archive from the latest release
-set(LIBMPV_URL "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260211/${LIBMPV}")
+set(LIBMPV_URL "https://github.com/bota-official/bota/releases/download/v0.2.8/${LIBMPV}")
 
 # Download location of the libmpv archive.
 set(LIBMPV_ARCHIVE "${CMAKE_BINARY_DIR}/${LIBMPV}")
@@ -163,6 +163,7 @@ if(NOT ANGLE_SRC_VALID)
     message(STATUS "7zip not found, falling back to CMake tar")
     add_custom_command(
       TARGET "${PROJECT_NAME}_ANGLE_EXTRACT"
+      POST_BUILD
       COMMAND "${CMAKE_COMMAND}" -E tar xzf "\"${ANGLE_ARCHIVE}\""
       WORKING_DIRECTORY "${ANGLE_SRC}"
     )
