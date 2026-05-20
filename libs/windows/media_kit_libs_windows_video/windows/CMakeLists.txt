@@ -67,16 +67,16 @@ endfunction()
 # Detect architecture and set appropriate libmpv archive
 if(${FLUTTER_TARGET_PLATFORM} STREQUAL "windows-x64")
   set(LIBMPV_ARCH "x86_64")
-  set(LIBMPV "mpv-dev-x86_64-20260419-git-06f4ce7.7z")
-  set(LIBMPV_MD5 "8b2554f13488f34e09cdc520c6e7a38f")
+  set(LIBMPV "mpv-dev-x86_64-20260219-git-d93c669.7z")
+  set(LIBMPV_MD5 "9e753c52b240088149d59828093b7fa0")
 else()
   set(LIBMPV_ARCH "aarch64")
-  set(LIBMPV "mpv-dev-aarch64-20260419-git-06f4ce7.7z")
-  set(LIBMPV_MD5 "6875d06a0faa2cbb47b3ee070922a87e")
+  set(LIBMPV "mpv-dev-aarch64-20260219-git-d93c669.7z")
+  set(LIBMPV_MD5 "0612bbd955aca27ef6f7052db852727d")
 endif()
 
 # Download URL for the libmpv archive from the latest release
-set(LIBMPV_URL "https://github.com/bota-official/bota/releases/download/v0.2.8/${LIBMPV}")
+set(LIBMPV_URL "https://github.com/bota-official/bota/releases/download/v0.2.5/${LIBMPV}")
 
 # Download location of the libmpv archive.
 set(LIBMPV_ARCHIVE "${CMAKE_BINARY_DIR}/${LIBMPV}")
