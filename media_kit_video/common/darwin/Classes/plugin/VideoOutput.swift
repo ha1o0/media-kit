@@ -26,6 +26,7 @@ public class VideoOutput: NSObject {
 
   private let handle: OpaquePointer
   private let enableHardwareAcceleration: Bool
+  private let renderBackend: String?
   private let registry: FlutterTextureRegistry
   private let textureUpdateCallback: TextureUpdateCallback
   private let worker: Worker = .init()
@@ -49,6 +50,7 @@ public class VideoOutput: NSObject {
     width = configuration.width
     height = configuration.height
     enableHardwareAcceleration = configuration.enableHardwareAcceleration
+    renderBackend = configuration.renderBackend
     self.registry = registry
     self.textureUpdateCallback = textureUpdateCallback
 
@@ -91,6 +93,7 @@ public class VideoOutput: NSObject {
       texture = SafeResizableTexture(
         TextureHW(
           handle: handle,
+          renderBackend: renderBackend,
           // Use `weak self` to prevent memory leaks
           updateCallback: { [weak self]() in
             guard let that = self else {

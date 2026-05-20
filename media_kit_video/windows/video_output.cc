@@ -56,9 +56,28 @@ VideoOutput::VideoOutput(int64_t handle,
             {MPV_RENDER_PARAM_API_TYPE, MPV_RENDER_API_TYPE_OPENGL},
             {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params},
             {MPV_RENDER_PARAM_INVALID, nullptr},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
         };
+        if (!configuration_.render_backend.empty()) {
+          params[2].type = static_cast<mpv_render_param_type>(21);
+          params[2].data =
+              const_cast<char*>(configuration_.render_backend.c_str());
+          std::cout << "media_kit: VideoOutput: Using mpv render backend "
+                    << configuration_.render_backend << "." << std::endl;
+        }
         // Create render context.
-        if (mpv_render_context_create(&render_context_, handle_, params) == 0) {
+        auto status =
+            mpv_render_context_create(&render_context_, handle_, params);
+        if (status != 0 && !configuration_.render_backend.empty()) {
+          params[2].type = MPV_RENDER_PARAM_INVALID;
+          params[2].data = nullptr;
+          std::cout << "media_kit: VideoOutput: Falling back to default mpv "
+                       "render backend."
+                    << std::endl;
+          status =
+              mpv_render_context_create(&render_context_, handle_, params);
+        }
+        if (status == 0) {
           mpv_render_context_set_update_callback(
               render_context_,
               [](void* context) {

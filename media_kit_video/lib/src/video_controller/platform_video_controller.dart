@@ -114,6 +114,12 @@ class VideoControllerConfiguration {
   /// Default: `true`
   final bool enableHardwareAcceleration;
 
+  /// Selects the native libmpv render backend when the platform implementation
+  /// supports it.
+  ///
+  /// Default: Platform specific.
+  final String? renderBackend;
+
   /// Whether to attach `android.view.Surface` after video parameters are known.
   ///
   /// Default:
@@ -129,6 +135,7 @@ class VideoControllerConfiguration {
     this.height,
     this.scale = 1.0,
     this.enableHardwareAcceleration = true,
+    this.renderBackend,
     this.androidAttachSurfaceAfterVideoParameters,
   });
 
@@ -140,6 +147,7 @@ class VideoControllerConfiguration {
     int? width,
     int? height,
     bool? enableHardwareAcceleration,
+    String? renderBackend,
     bool? androidAttachSurfaceAfterVideoParameters,
   }) =>
       VideoControllerConfiguration(
@@ -150,6 +158,7 @@ class VideoControllerConfiguration {
         height: height ?? this.height,
         enableHardwareAcceleration:
             enableHardwareAcceleration ?? this.enableHardwareAcceleration,
+        renderBackend: renderBackend ?? this.renderBackend,
         androidAttachSurfaceAfterVideoParameters:
             androidAttachSurfaceAfterVideoParameters ??
                 this.androidAttachSurfaceAfterVideoParameters,
