@@ -20,13 +20,16 @@ typedef struct _VideoOutputConfiguration {
   gint64 width;
   gint64 height;
   bool enable_hardware_acceleration;
+  const gchar* render_backend;
 
   _VideoOutputConfiguration(gint64 width = NULL,
                             gint64 height = NULL,
-                            bool enable_hardware_acceleration = true)
+                            bool enable_hardware_acceleration = true,
+                            const gchar* render_backend = NULL)
       : width(width),
         height(height),
-        enable_hardware_acceleration(enable_hardware_acceleration) {}
+        enable_hardware_acceleration(enable_hardware_acceleration),
+        render_backend(render_backend) {}
 } VideoOutputConfiguration;
 
 // Callback invoked when the texture ID updates i.e. video dimensions changes.
