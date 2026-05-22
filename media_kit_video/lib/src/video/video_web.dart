@@ -87,6 +87,12 @@ class Video extends StatefulWidget {
   /// Filter quality of the [Texture] widget displaying the video output.
   final FilterQuality filterQuality;
 
+  /// Visual rotation applied to the rendered video frame only.
+  final int visualRotation;
+
+  /// Whether to mirror the rendered video frame horizontally.
+  final bool visualMirror;
+
   /// Video controls builder.
   final /* VideoControlsBuilder? */ dynamic controls;
 
@@ -125,6 +131,8 @@ class Video extends StatefulWidget {
     this.alignment = Alignment.center,
     this.aspectRatio,
     this.filterQuality = FilterQuality.low,
+    this.visualRotation = 0,
+    this.visualMirror = false,
     this.controls = media_kit_video_controls.AdaptiveVideoControls,
     this.wakelock = true,
     this.pauseUponEnteringBackgroundMode = true,
@@ -189,6 +197,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
     Alignment? alignment,
     double? aspectRatio,
     FilterQuality? filterQuality,
+    int? visualRotation,
+    bool? visualMirror,
     /* VideoControlsBuilder? */ dynamic controls,
     SubtitleViewConfiguration? subtitleViewConfiguration,
     FocusNode? focusNode,
@@ -202,6 +212,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
       alignment: alignment,
       aspectRatio: aspectRatio,
       filterQuality: filterQuality,
+      visualRotation: visualRotation,
+      visualMirror: visualMirror,
       controls: controls,
       subtitleViewConfiguration: subtitleViewConfiguration,
       focusNode: focusNode,
@@ -231,6 +243,12 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
       filterQuality: widget.filterQuality != oldWidget.filterQuality
           ? widget.filterQuality
           : currentParams.filterQuality,
+      visualRotation: widget.visualRotation != oldWidget.visualRotation
+          ? widget.visualRotation
+          : currentParams.visualRotation,
+      visualMirror: widget.visualMirror != oldWidget.visualMirror
+          ? widget.visualMirror
+          : currentParams.visualMirror,
       controls: widget.controls != oldWidget.controls
           ? widget.controls
           : currentParams.controls,
@@ -265,6 +283,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                 alignment: widget.alignment,
                 aspectRatio: widget.aspectRatio,
                 filterQuality: widget.filterQuality,
+                visualRotation: widget.visualRotation,
+                visualMirror: widget.visualMirror,
                 controls: widget.controls,
                 subtitleViewConfiguration: widget.subtitleViewConfiguration,
                 focusNode: widget.focusNode,
@@ -409,7 +429,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                                     if (id != null &&
                                         rect != null &&
                                         _visible) {
-                                      return SizedBox(
+                                      final view = SizedBox(
                                         // Apply aspect ratio if provided.
                                         width:
                                             videoViewParameters.aspectRatio ==
@@ -424,6 +444,13 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                                           viewType:
                                               'com.alexmercerind.media_kit_video.$id',
                                         ),
+                                      );
+                                      return _VisualTransform(
+                                        rotation:
+                                            videoViewParameters.visualRotation,
+                                        mirror:
+                                            videoViewParameters.visualMirror,
+                                        child: view,
                                       );
                                     }
                                     return const SizedBox.shrink();
@@ -455,6 +482,42 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
         },
       ),
     );
+  }
+}
+
+class _VisualTransform extends StatelessWidget {
+  final int rotation;
+  final bool mirror;
+  final Widget child;
+
+  const _VisualTransform({
+    required this.rotation,
+    required this.mirror,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final normalizedRotation = ((rotation % 360) + 360) % 360;
+    final quarterTurns = normalizedRotation ~/ 90;
+    Widget result = child;
+
+    if (mirror) {
+      result = Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.identity()..scale(-1.0, 1.0),
+        child: result,
+      );
+    }
+
+    if (quarterTurns != 0) {
+      result = RotatedBox(
+        quarterTurns: quarterTurns,
+        child: result,
+      );
+    }
+
+    return result;
   }
 }
 

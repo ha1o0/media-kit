@@ -25,6 +25,8 @@ class VideoViewParameters {
   final Alignment alignment;
   final double? aspectRatio;
   final FilterQuality filterQuality;
+  final int visualRotation;
+  final bool visualMirror;
   final /* VideoControlsBuilder? */ dynamic controls;
   final SubtitleViewConfiguration subtitleViewConfiguration;
   final FocusNode? focusNode;
@@ -38,6 +40,8 @@ class VideoViewParameters {
     required this.alignment,
     required this.aspectRatio,
     required this.filterQuality,
+    required this.visualRotation,
+    required this.visualMirror,
     required this.controls,
     required this.subtitleViewConfiguration,
     this.focusNode,
@@ -51,6 +55,8 @@ class VideoViewParameters {
     Alignment? alignment,
     double? aspectRatio,
     FilterQuality? filterQuality,
+    int? visualRotation,
+    bool? visualMirror,
     /* VideoControlsBuilder? */ dynamic controls,
     bool? pauseUponEnteringBackgroundMode,
     bool? resumeUponEnteringForegroundMode,
@@ -67,6 +73,8 @@ class VideoViewParameters {
       alignment: alignment ?? this.alignment,
       aspectRatio: aspectRatio ?? this.aspectRatio,
       filterQuality: filterQuality ?? this.filterQuality,
+      visualRotation: visualRotation ?? this.visualRotation,
+      visualMirror: visualMirror ?? this.visualMirror,
       controls: controls ?? this.controls,
       subtitleViewConfiguration:
           subtitleViewConfiguration ?? this.subtitleViewConfiguration,
@@ -85,6 +93,8 @@ class VideoViewParameters {
           other.alignment == alignment &&
           other.aspectRatio == aspectRatio &&
           other.filterQuality == filterQuality &&
+          other.visualRotation == visualRotation &&
+          other.visualMirror == visualMirror &&
           other.controls == controls &&
           other.subtitleViewConfiguration == subtitleViewConfiguration &&
           other.focusNode == focusNode;
@@ -98,6 +108,8 @@ class VideoViewParameters {
       alignment.hashCode ^
       aspectRatio.hashCode ^
       filterQuality.hashCode ^
+      visualRotation.hashCode ^
+      visualMirror.hashCode ^
       controls.hashCode ^
       subtitleViewConfiguration.hashCode ^
       focusNode.hashCode;
