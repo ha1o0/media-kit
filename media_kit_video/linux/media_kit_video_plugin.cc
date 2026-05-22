@@ -48,6 +48,12 @@ static void media_kit_video_plugin_handle_method_call(
         fl_value_get_string(fl_value_lookup_string(configuration, "height"));
     const bool configuration_enable_hardware_acceleration = fl_value_get_bool(
         fl_value_lookup_string(configuration, "enableHardwareAcceleration"));
+    FlValue* configuration_render_backend_value =
+        fl_value_lookup_string(configuration, "renderBackend");
+    const gchar* configuration_render_backend =
+        configuration_render_backend_value != NULL
+            ? fl_value_get_string(configuration_render_backend_value)
+            : NULL;
 
     if (g_strcmp0(configuration_width, "null") != 0) {
       configuration_value.width =
@@ -59,6 +65,10 @@ static void media_kit_video_plugin_handle_method_call(
     }
     configuration_value.enable_hardware_acceleration =
         configuration_enable_hardware_acceleration;
+    if (configuration_render_backend != NULL &&
+        g_strcmp0(configuration_render_backend, "null") != 0) {
+      configuration_value.render_backend = configuration_render_backend;
+    }
 
     typedef struct _VideoOutputTextureUpdateCallbackData {
       FlMethodChannel* channel;

@@ -58,7 +58,9 @@ void nativeEnsureInitialized({String? libmpv}) {
     // See: https://github.com/media-kit/media-kit/issues/1314
     final mpv = generated.MPV(DynamicLibrary.open(NativeLibrary.path));
     for (final reference in references) {
-      mpv.mpv_set_wakeup_callback(reference.cast(), nullptr, nullptr);
+      try {
+        mpv.mpv_set_wakeup_callback(reference.cast(), nullptr, nullptr);
+      } catch (_) {}
     }
 
     // Now it's safe to send quit; mpv won't try to notify Dart anymore.

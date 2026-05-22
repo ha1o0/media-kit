@@ -183,6 +183,7 @@ class NativeVideoController extends PlatformVideoController {
           'height': configuration.height.toString(),
           'enableHardwareAcceleration':
               configuration.enableHardwareAcceleration,
+          'renderBackend': configuration.renderBackend?.toString() ?? 'null',
         },
       },
     );

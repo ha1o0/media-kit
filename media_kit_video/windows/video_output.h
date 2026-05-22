@@ -10,6 +10,7 @@
 #define VIDEO_OUTPUT_H_
 
 #include <optional>
+#include <string>
 
 #include <client.h>
 #include <render.h>
@@ -29,13 +30,16 @@ typedef struct _VideoOutputConfiguration {
   std::optional<int64_t> width;
   std::optional<int64_t> height;
   bool enable_hardware_acceleration;
+  std::string render_backend;
 
   _VideoOutputConfiguration(std::optional<int64_t> width = std::nullopt,
                             std::optional<int64_t> height = std::nullopt,
-                            bool enable_hardware_acceleration = true)
+                            bool enable_hardware_acceleration = true,
+                            std::string render_backend = "")
       : width(width),
         height(height),
-        enable_hardware_acceleration(enable_hardware_acceleration) {}
+        enable_hardware_acceleration(enable_hardware_acceleration),
+        render_backend(render_backend) {}
 } VideoOutputConfiguration;
 
 class VideoOutput {

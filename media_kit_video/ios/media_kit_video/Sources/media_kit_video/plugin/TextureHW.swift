@@ -9,6 +9,7 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
   public typealias UpdateCallback = () -> Void
 
   private let handle: OpaquePointer
+  private let renderBackend: String?
   private let updateCallback: UpdateCallback
   private let context: EAGLContext
   private let textureCache: CVOpenGLESTextureCache
@@ -20,9 +21,11 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
 
   init(
     handle: OpaquePointer,
+    renderBackend: String?,
     updateCallback: @escaping UpdateCallback
   ) {
     self.handle = handle
+    self.renderBackend = renderBackend
     self.updateCallback = updateCallback
     self.context = OpenGLESHelpers.createContext()
     self.textureCache = OpenGLESHelpers.createTextureCache(context)
@@ -70,10 +73,16 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
       },
       get_proc_address_ctx: nil
     )
+    let backendString = renderBackend.map { $0 as NSString }
+    let backend = backendString.map {
+      UnsafeMutableRawPointer(mutating: $0.utf8String)
+    }
 
-    var params: [mpv_render_param] = withUnsafeMutableBytes(of: &procAddress) {
-      procAddress in
-      return [
+    func makeParams(
+      _ procAddress: UnsafeMutableRawBufferPointer,
+      includeBackend: Bool
+    ) -> [mpv_render_param] {
+      var params = [
         mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: api),
         mpv_render_param(
           type: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
@@ -83,11 +92,39 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
         ),
         mpv_render_param(),
       ]
+
+      if includeBackend,
+        let renderBackend = renderBackend,
+        let backend = backend
+      {
+        // MPV_RENDER_PARAM_BACKEND was added after media-kit's bundled v0.36
+        // headers, but newer bundled libmpv versions understand this ABI value.
+        let renderParamBackend = mpv_render_param_type(rawValue: 21)
+        NSLog("TextureHW: using mpv render backend \(renderBackend)")
+        params.insert(
+          mpv_render_param(type: renderParamBackend, data: backend),
+          at: 1
+        )
+      }
+
+      return params
     }
 
-    MPVHelpers.checkError(
-      mpv_render_context_create(&renderContext, handle, &params)
-    )
+    var params: [mpv_render_param] = withUnsafeMutableBytes(of: &procAddress) {
+      procAddress in
+      return makeParams(procAddress, includeBackend: renderBackend != nil)
+    }
+
+    var status = mpv_render_context_create(&renderContext, handle, &params)
+    if status < 0 && renderBackend != nil {
+      NSLog("TextureHW: falling back to default mpv render backend")
+      params = withUnsafeMutableBytes(of: &procAddress) {
+        procAddress in
+        return makeParams(procAddress, includeBackend: false)
+      }
+      status = mpv_render_context_create(&renderContext, handle, &params)
+    }
+    MPVHelpers.checkError(status)
 
     mpv_render_context_set_update_callback(
       renderContext,
