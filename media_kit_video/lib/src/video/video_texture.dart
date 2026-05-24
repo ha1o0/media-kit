@@ -163,19 +163,27 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   bool _pauseDueToPauseUponEnteringBackgroundMode = false;
   // Public API:
   bool isFullscreen() {
-    return media_kit_video_controls.isFullscreen(_contextNotifier.value!);
+    final context = _contextNotifier.value;
+    if (context == null || !context.mounted) return false;
+    return media_kit_video_controls.isFullscreen(context);
   }
 
-  Future<void> enterFullscreen() {
-    return media_kit_video_controls.enterFullscreen(_contextNotifier.value!);
+  Future<void> enterFullscreen() async {
+    final context = _contextNotifier.value;
+    if (context == null || !context.mounted) return;
+    await media_kit_video_controls.enterFullscreen(context);
   }
 
-  Future<void> exitFullscreen() {
-    return media_kit_video_controls.exitFullscreen(_contextNotifier.value!);
+  Future<void> exitFullscreen() async {
+    final context = _contextNotifier.value;
+    if (context == null || !context.mounted) return;
+    await media_kit_video_controls.exitFullscreen(context);
   }
 
-  Future<void> toggleFullscreen() {
-    return media_kit_video_controls.toggleFullscreen(_contextNotifier.value!);
+  Future<void> toggleFullscreen() async {
+    final context = _contextNotifier.value;
+    if (context == null || !context.mounted) return;
+    await media_kit_video_controls.toggleFullscreen(context);
   }
 
   void setSubtitleViewPadding(
@@ -292,6 +300,9 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
     if (newParams != currentParams) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || (_disposeNotifiers && _contextNotifier.disposed)) {
+          return;
+        }
         videoViewParametersNotifier.value = newParams;
       });
     }
@@ -332,7 +343,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
           (value) {
             _width = value;
             final visible = (_width ?? 0) > 0 && (_height ?? 0) > 0;
-            if (_visible != visible) {
+            if (mounted && _visible != visible) {
               setState(() {
                 _visible = visible;
               });
@@ -343,7 +354,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
           (value) {
             _height = value;
             final visible = (_width ?? 0) > 0 && (_height ?? 0) > 0;
-            if (_visible != visible) {
+            if (mounted && _visible != visible) {
               setState(() {
                 _visible = visible;
               });
