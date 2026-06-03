@@ -182,6 +182,15 @@ class MaterialDesktopVideoControlsThemeData {
   /// Whether to show video chapters on the seek bar.
   final bool showVideoChapters;
 
+  /// Danmaku heatmap data.
+  final List<double>? danmakuHeatmap;
+
+  /// The height of the danmaku heatmap curve.
+  final double danmakuHeatmapHeight;
+
+  /// The color of the danmaku heatmap curve.
+  final Color? danmakuHeatmapColor;
+
   /// {@macro material_desktop_video_controls_theme_data}
   const MaterialDesktopVideoControlsThemeData({
     this.displaySeekBar = true,
@@ -232,6 +241,9 @@ class MaterialDesktopVideoControlsThemeData {
     this.volumeBarTransitionDuration = const Duration(milliseconds: 150),
     this.shiftSubtitlesOnControlsVisibilityChange = true,
     this.showVideoChapters = true,
+    this.danmakuHeatmap,
+    this.danmakuHeatmapHeight = 40.0,
+    this.danmakuHeatmapColor,
   });
 
   /// Creates a copy of this [MaterialDesktopVideoControlsThemeData] with the given fields replaced by the non-null parameter values.
@@ -274,6 +286,9 @@ class MaterialDesktopVideoControlsThemeData {
     Duration? volumeBarTransitionDuration,
     bool? shiftSubtitlesOnControlsVisibilityChange,
     bool? showVideoChapters,
+    List<double>? danmakuHeatmap,
+    double? danmakuHeatmapHeight,
+    Color? danmakuHeatmapColor,
   }) {
     return MaterialDesktopVideoControlsThemeData(
       displaySeekBar: displaySeekBar ?? this.displaySeekBar,
@@ -329,6 +344,9 @@ class MaterialDesktopVideoControlsThemeData {
           shiftSubtitlesOnControlsVisibilityChange ??
               this.shiftSubtitlesOnControlsVisibilityChange,
       showVideoChapters: showVideoChapters ?? this.showVideoChapters,
+      danmakuHeatmap: danmakuHeatmap ?? this.danmakuHeatmap,
+      danmakuHeatmapHeight: danmakuHeatmapHeight ?? this.danmakuHeatmapHeight,
+      danmakuHeatmapColor: danmakuHeatmapColor ?? this.danmakuHeatmapColor,
     );
   }
 }
@@ -1109,6 +1127,22 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                 clipBehavior: Clip.none,
                 alignment: Alignment.centerLeft,
                 children: [
+                  if (_theme(context).danmakuHeatmap != null &&
+                      _theme(context).danmakuHeatmap!.isNotEmpty)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: (_theme(context).seekBarContainerHeight ?? 36.0) / 2,
+                      height: _theme(context).danmakuHeatmapHeight,
+                      child: IgnorePointer(
+                        child: CustomPaint(
+                          painter: _DanmakuHeatmapPainter(
+                            _theme(context).danmakuHeatmap!,
+                            _theme(context).danmakuHeatmapColor ?? _theme(context).seekBarThumbColor.withOpacity(0.35),
+                          ),
+                        ),
+                      ),
+                    ),
                   AnimatedContainer(
                     width: constraints.maxWidth,
                     height: hover
@@ -1705,3 +1739,60 @@ class _CustomTrackShape extends RoundedRectSliderTrackShape {
     );
   }
 }
+
+class _DanmakuHeatmapPainter extends CustomPainter {
+  final List<double> heatmap;
+  final Color color;
+
+  _DanmakuHeatmapPainter(this.heatmap, this.color);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (heatmap.isEmpty) return;
+
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+
+    final path = Path();
+    final double stepX = size.width / (heatmap.length - 1);
+
+    path.moveTo(0, size.height);
+
+    for (int i = 0; i < heatmap.length; i++) {
+      final x = i * stepX;
+      // heatmap[i] 范围是 0.0 ~ 1.0。在此将最大高度限制在给定的 height 内
+      final y = size.height - (heatmap[i] * size.height);
+      
+      if (i == 0) {
+        path.lineTo(x, y);
+      } else {
+        final prevX = (i - 1) * stepX;
+        final prevY = size.height - (heatmap[i - 1] * size.height);
+        final controlPointX = prevX + (stepX / 2);
+        
+        path.cubicTo(
+          controlPointX, prevY,
+          controlPointX, y,
+          x, y,
+        );
+      }
+    }
+
+    path.lineTo(size.width, size.height);
+    path.close();
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _DanmakuHeatmapPainter oldDelegate) {
+    if (oldDelegate.color != color) return true;
+    if (oldDelegate.heatmap.length != heatmap.length) return true;
+    for (int i = 0; i < heatmap.length; i++) {
+      if (oldDelegate.heatmap[i] != heatmap[i]) return true;
+    }
+    return false;
+  }
+}
+
