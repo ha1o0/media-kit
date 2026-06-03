@@ -179,6 +179,9 @@ class MaterialDesktopVideoControlsThemeData {
   /// Whether to shift the subtitles upwards when the controls are visible.
   final bool shiftSubtitlesOnControlsVisibilityChange;
 
+  /// Whether to show video chapters on the seek bar.
+  final bool showVideoChapters;
+
   /// {@macro material_desktop_video_controls_theme_data}
   const MaterialDesktopVideoControlsThemeData({
     this.displaySeekBar = true,
@@ -228,6 +231,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.volumeBarThumbColor = const Color(0xFFFFFFFF),
     this.volumeBarTransitionDuration = const Duration(milliseconds: 150),
     this.shiftSubtitlesOnControlsVisibilityChange = true,
+    this.showVideoChapters = true,
   });
 
   /// Creates a copy of this [MaterialDesktopVideoControlsThemeData] with the given fields replaced by the non-null parameter values.
@@ -269,6 +273,7 @@ class MaterialDesktopVideoControlsThemeData {
     Color? volumeBarThumbColor,
     Duration? volumeBarTransitionDuration,
     bool? shiftSubtitlesOnControlsVisibilityChange,
+    bool? showVideoChapters,
   }) {
     return MaterialDesktopVideoControlsThemeData(
       displaySeekBar: displaySeekBar ?? this.displaySeekBar,
@@ -323,6 +328,7 @@ class MaterialDesktopVideoControlsThemeData {
       shiftSubtitlesOnControlsVisibilityChange:
           shiftSubtitlesOnControlsVisibilityChange ??
               this.shiftSubtitlesOnControlsVisibilityChange,
+      showVideoChapters: showVideoChapters ?? this.showVideoChapters,
     );
   }
 }
@@ -884,6 +890,14 @@ class _MaterialDesktopVideoControlsState
 
 // SEEK BAR
 
+class VideoChapter {
+  final int index;
+  final String title;
+  final double time;
+
+  const VideoChapter(this.index, this.title, this.time);
+}
+
 /// Material design seek bar.
 class MaterialDesktopSeekBar extends StatefulWidget {
   final VoidCallback? onSeekStart;
@@ -909,6 +923,8 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   late Duration duration = controller(context).player.state.duration;
   late Duration buffer = controller(context).player.state.buffer;
 
+  List<VideoChapter> chapters = [];
+
   final List<StreamSubscription> subscriptions = [];
 
   @override
@@ -922,6 +938,9 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (subscriptions.isEmpty) {
+      if (duration > Duration.zero && chapters.isEmpty) {
+        _fetchChapters();
+      }
       subscriptions.addAll(
         [
           controller(context).player.stream.playing.listen((event) {
@@ -943,6 +962,13 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
             setState(() {
               duration = event;
             });
+            if (event == Duration.zero) {
+              setState(() {
+                chapters = [];
+              });
+            } else if (chapters.isEmpty) {
+              _fetchChapters();
+            }
           }),
           controller(context).player.stream.buffer.listen((event) {
             setState(() {
@@ -960,6 +986,35 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       subscription.cancel();
     }
     super.dispose();
+  }
+
+  Future<void> _fetchChapters() async {
+    try {
+      final dynamic platform = controller(context).player.platform;
+      final countStr = await platform.getProperty('chapter-list/count');
+      if (countStr != null && countStr.isNotEmpty) {
+        final count = int.tryParse(countStr) ?? 0;
+        if (count > 0) {
+          final List<VideoChapter> newChapters = [];
+          for (int i = 0; i < count; i++) {
+            final title = await platform.getProperty('chapter-list/$i/title');
+            final timeStr = await platform.getProperty('chapter-list/$i/time');
+            newChapters.add(VideoChapter(
+              i,
+              title ?? 'Chapter ${i + 1}',
+              double.tryParse(timeStr ?? '0') ?? 0.0,
+            ));
+          }
+          if (mounted) {
+            setState(() {
+              chapters = newChapters;
+            });
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to fetch chapters: $e');
+    }
   }
 
   void onPointerMove(PointerMoveEvent e, BoxConstraints constraints) {
@@ -1080,6 +1135,32 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                               : constraints.maxWidth * positionPercent,
                           color: _theme(context).seekBarPositionColor,
                         ),
+                        if (_theme(context).showVideoChapters &&
+                            chapters.isNotEmpty &&
+                            duration.inMilliseconds > 0)
+                          ...chapters.map((chapter) {
+                            final percent = chapter.time /
+                                (duration.inMilliseconds / 1000.0);
+                            if (percent <= 0.0 || percent >= 1.0) {
+                              return const SizedBox.shrink();
+                            }
+                            
+                            // Check if this chapter is hovered
+                            final bool isHovered = hover && (slider - percent).abs() * constraints.maxWidth < 8.0;
+
+                            return Positioned(
+                              left: constraints.maxWidth * percent,
+                              top: isHovered ? -2.0 : 0,
+                              bottom: isHovered ? -2.0 : 0,
+                              child: Container(
+                                width: isHovered ? 4.0 : 2.0,
+                                decoration: BoxDecoration(
+                                  color: isHovered ? _theme(context).seekBarThumbColor : const Color(0x66000000),
+                                  borderRadius: isHovered ? BorderRadius.circular(2.0) : null,
+                                ),
+                              ),
+                            );
+                          }),
                       ],
                     ),
                   ),
