@@ -191,6 +191,9 @@ class MaterialDesktopVideoControlsThemeData {
   /// The color of the danmaku heatmap curve.
   final Color? danmakuHeatmapColor;
 
+  /// Whether to lock the controls to stay visible (prevents auto-hide).
+  final bool lockControlsVisible;
+
   /// {@macro material_desktop_video_controls_theme_data}
   const MaterialDesktopVideoControlsThemeData({
     this.displaySeekBar = true,
@@ -244,6 +247,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.danmakuHeatmap,
     this.danmakuHeatmapHeight = 40.0,
     this.danmakuHeatmapColor,
+    this.lockControlsVisible = false,
   });
 
   /// Creates a copy of this [MaterialDesktopVideoControlsThemeData] with the given fields replaced by the non-null parameter values.
@@ -289,6 +293,7 @@ class MaterialDesktopVideoControlsThemeData {
     List<double>? danmakuHeatmap,
     double? danmakuHeatmapHeight,
     Color? danmakuHeatmapColor,
+    bool? lockControlsVisible,
   }) {
     return MaterialDesktopVideoControlsThemeData(
       displaySeekBar: displaySeekBar ?? this.displaySeekBar,
@@ -347,6 +352,7 @@ class MaterialDesktopVideoControlsThemeData {
       danmakuHeatmap: danmakuHeatmap ?? this.danmakuHeatmap,
       danmakuHeatmapHeight: danmakuHeatmapHeight ?? this.danmakuHeatmapHeight,
       danmakuHeatmapColor: danmakuHeatmapColor ?? this.danmakuHeatmapColor,
+      lockControlsVisible: lockControlsVisible ?? this.lockControlsVisible,
     );
   }
 }
@@ -454,7 +460,7 @@ class _MaterialDesktopVideoControlsState
         _timer = Timer(
           _theme(context).controlsHoverDuration,
           () {
-            if (mounted) {
+            if (mounted && !_theme(context).lockControlsVisible) {
               setState(() {
                 visible = false;
               });
@@ -504,7 +510,7 @@ class _MaterialDesktopVideoControlsState
     shiftSubtitle();
     _timer?.cancel();
     _timer = Timer(_theme(context).controlsHoverDuration, () {
-      if (mounted) {
+      if (mounted && !_theme(context).lockControlsVisible) {
         setState(() {
           visible = false;
         });
@@ -521,7 +527,7 @@ class _MaterialDesktopVideoControlsState
     shiftSubtitle();
     _timer?.cancel();
     _timer = Timer(_theme(context).controlsHoverDuration, () {
-      if (mounted) {
+      if (mounted && !_theme(context).lockControlsVisible) {
         setState(() {
           visible = false;
         });
@@ -531,6 +537,7 @@ class _MaterialDesktopVideoControlsState
   }
 
   void onExit() {
+    if (_theme(context).lockControlsVisible) return;
     setState(() {
       visible = false;
     });
@@ -804,7 +811,7 @@ class _MaterialDesktopVideoControlsState
                                                 _theme(context)
                                                     .controlsHoverDuration,
                                                 () {
-                                                  if (mounted) {
+                                                  if (mounted && !_theme(context).lockControlsVisible) {
                                                     setState(() {
                                                       visible = false;
                                                     });
