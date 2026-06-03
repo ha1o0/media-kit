@@ -588,6 +588,7 @@ class _MaterialDesktopVideoControlsState
               shadowColor: const Color(0x00000000),
               surfaceTintColor: const Color(0x00000000),
               child: Listener(
+                onPointerDown: (_) => onHover(),
                 onPointerSignal: _theme(context).modifyVolumeOnScroll
                     ? (e) {
                         if (e is PointerScrollEvent) {
