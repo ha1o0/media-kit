@@ -2335,6 +2335,8 @@ class NativePlayer extends PlatformPlayer {
         // Set --vid=no by default to prevent redundant video decoding.
         // [VideoController] internally sets --vid=auto upon attachment to enable video rendering & decoding.
         if (!test) 'vid': 'no',
+        if (configuration.volumeMax != null)
+          'volume-max': configuration.volumeMax.toString(),
       };
 
       if (Platform.isAndroid &&

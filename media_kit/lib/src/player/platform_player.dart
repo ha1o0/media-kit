@@ -502,6 +502,11 @@ class PlayerConfiguration {
   /// Default: `none`.
   final MPVLogLevel logLevel;
 
+  /// Sets the maximum volume for native backend.
+  ///
+  /// Values above `100.0` enable software gain.
+  final double? volumeMax;
+
   /// Sets the demuxer cache size (in bytes) for native backend.
   ///
   /// Default: `32` MB or `32 * 1024 * 1024` bytes.
@@ -527,6 +532,7 @@ class PlayerConfiguration {
     this.libassAndroidFont,
     this.libassAndroidFontName,
     this.logLevel = MPVLogLevel.error,
+    this.volumeMax,
     this.bufferSize = 32 * 1024 * 1024,
     this.protocolWhitelist = const [
       'udp',
