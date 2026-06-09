@@ -182,6 +182,10 @@ class MaterialDesktopVideoControlsThemeData {
   /// Whether to show video chapters on the seek bar.
   final bool showVideoChapters;
 
+  /// Video chapters to render on the seek bar. If null, the seek bar falls back
+  /// to reading chapters from the underlying player.
+  final List<VideoChapter>? videoChapters;
+
   /// Danmaku heatmap data.
   final List<double>? danmakuHeatmap;
 
@@ -244,6 +248,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.volumeBarTransitionDuration = const Duration(milliseconds: 150),
     this.shiftSubtitlesOnControlsVisibilityChange = true,
     this.showVideoChapters = true,
+    this.videoChapters,
     this.danmakuHeatmap,
     this.danmakuHeatmapHeight = 40.0,
     this.danmakuHeatmapColor,
@@ -290,6 +295,7 @@ class MaterialDesktopVideoControlsThemeData {
     Duration? volumeBarTransitionDuration,
     bool? shiftSubtitlesOnControlsVisibilityChange,
     bool? showVideoChapters,
+    List<VideoChapter>? videoChapters,
     List<double>? danmakuHeatmap,
     double? danmakuHeatmapHeight,
     Color? danmakuHeatmapColor,
@@ -349,6 +355,7 @@ class MaterialDesktopVideoControlsThemeData {
           shiftSubtitlesOnControlsVisibilityChange ??
               this.shiftSubtitlesOnControlsVisibilityChange,
       showVideoChapters: showVideoChapters ?? this.showVideoChapters,
+      videoChapters: videoChapters ?? this.videoChapters,
       danmakuHeatmap: danmakuHeatmap ?? this.danmakuHeatmap,
       danmakuHeatmapHeight: danmakuHeatmapHeight ?? this.danmakuHeatmapHeight,
       danmakuHeatmapColor: danmakuHeatmapColor ?? this.danmakuHeatmapColor,
@@ -949,6 +956,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   late Duration buffer = controller(context).player.state.buffer;
 
   List<VideoChapter> chapters = [];
+  bool chaptersExternallyManaged = false;
 
   final List<StreamSubscription> subscriptions = [];
 
@@ -962,8 +970,15 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    chaptersExternallyManaged = _theme(context).videoChapters != null;
+    if (chaptersExternallyManaged && chapters.isNotEmpty) {
+      chapters = [];
+    }
+
     if (subscriptions.isEmpty) {
-      if (duration > Duration.zero && chapters.isEmpty) {
+      if (!chaptersExternallyManaged &&
+          duration > Duration.zero &&
+          chapters.isEmpty) {
         _fetchChapters();
       }
       subscriptions.addAll(
@@ -987,7 +1002,13 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
             setState(() {
               duration = event;
             });
-            if (event == Duration.zero) {
+            if (chaptersExternallyManaged) {
+              if (chapters.isNotEmpty) {
+                setState(() {
+                  chapters = [];
+                });
+              }
+            } else if (event == Duration.zero) {
               setState(() {
                 chapters = [];
               });
@@ -1015,6 +1036,8 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
 
   Future<void> _fetchChapters() async {
     try {
+      if (chaptersExternallyManaged) return;
+
       final dynamic platform = controller(context).player.platform;
       final countStr = await platform.getProperty('chapter-list/count');
       if (countStr != null && countStr.isNotEmpty) {
@@ -1113,6 +1136,8 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
 
   @override
   Widget build(BuildContext context) {
+    final displayedChapters = _theme(context).videoChapters ?? chapters;
+
     return Container(
       clipBehavior: Clip.none,
       margin: _theme(context).seekBarMargin,
@@ -1177,9 +1202,9 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                           color: _theme(context).seekBarPositionColor,
                         ),
                         if (_theme(context).showVideoChapters &&
-                            chapters.isNotEmpty &&
+                            displayedChapters.isNotEmpty &&
                             duration.inMilliseconds > 0)
-                          ...chapters.map((chapter) {
+                          ...displayedChapters.map((chapter) {
                             final percent = chapter.time /
                                 (duration.inMilliseconds / 1000.0);
                             if (percent <= 0.0 || percent >= 1.0) {
