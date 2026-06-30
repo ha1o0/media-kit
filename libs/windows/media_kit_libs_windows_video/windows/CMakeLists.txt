@@ -67,8 +67,8 @@ endfunction()
 # Detect architecture and set appropriate libmpv archive
 if(${FLUTTER_TARGET_PLATFORM} STREQUAL "windows-x64")
   set(LIBMPV_ARCH "x86_64")
-  set(LIBMPV "mpv-dev-x86_64-20260219-git-d93c669.7z")
-  set(LIBMPV_MD5 "9e753c52b240088149d59828093b7fa0")
+  set(LIBMPV "mpv-dev-x86_64-20260630-git-5b0a916.7z")
+  set(LIBMPV_MD5 "7efb6a353e4cb20e59522adc4cea9c57")
 else()
   set(LIBMPV_ARCH "aarch64")
   set(LIBMPV "mpv-dev-aarch64-20260219-git-d93c669.7z")
@@ -76,7 +76,7 @@ else()
 endif()
 
 # Download URL for the libmpv archive from the latest release
-set(LIBMPV_URL "https://github.com/bota-official/bota/releases/download/v0.2.5/${LIBMPV}")
+set(LIBMPV_URL "https://github.com/bota-official/bota/releases/download/v0.5.1/${LIBMPV}")
 
 # Download location of the libmpv archive.
 set(LIBMPV_ARCHIVE "${CMAKE_BINARY_DIR}/${LIBMPV}")
@@ -124,53 +124,6 @@ if(NOT LIBMPV_SRC_VALID)
   endif()
 endif()
 
-# ------------------------------------------------------------------------------
-
-# ANGLE archive containing the pre-built shared libraries & headers.
-set(ANGLE "ANGLE.7z")
-
-# Download URL & MD5 hash of the ANGLE archive.
-set(ANGLE_URL "https://github.com/alexmercerind/flutter-windows-ANGLE-OpenGL-ES/releases/download/v1.0.1/ANGLE.7z")
-set(ANGLE_MD5 "e866f13e8d552348058afaafe869b1ed")
-
-# Download location of the ANGLE archive.
-set(ANGLE_ARCHIVE "${CMAKE_BINARY_DIR}/${ANGLE}")
-set(ANGLE_SRC "${CMAKE_BINARY_DIR}/ANGLE")
-
-download_and_verify(
-  ${ANGLE_URL}
-  ${ANGLE_MD5}
-  ${ANGLE_ARCHIVE}
-)
-
-check_directory_exists_and_not_empty(${ANGLE_SRC} ANGLE_SRC_VALID)
-
-# Extract the ANGLE archive.
-if(NOT ANGLE_SRC_VALID)
-  message(STATUS "Extracting ${ANGLE}...")
-  make_directory("${ANGLE_SRC}")
-  add_custom_target("${PROJECT_NAME}_ANGLE_EXTRACT" ALL)
-  
-  if(SEVENZ_EXECUTABLE)
-    message(STATUS "Using 7zip for extraction: ${SEVENZ_EXECUTABLE}")
-    add_custom_command(
-      TARGET "${PROJECT_NAME}_ANGLE_EXTRACT"
-      POST_BUILD
-      COMMAND "${SEVENZ_EXECUTABLE}" x -y "\"${ANGLE_ARCHIVE}\""
-      WORKING_DIRECTORY "${ANGLE_SRC}"
-    )
-  else()
-    message(STATUS "7zip not found, falling back to CMake tar")
-    add_custom_command(
-      TARGET "${PROJECT_NAME}_ANGLE_EXTRACT"
-      POST_BUILD
-      COMMAND "${CMAKE_COMMAND}" -E tar xzf "\"${ANGLE_ARCHIVE}\""
-      WORKING_DIRECTORY "${ANGLE_SRC}"
-    )
-  endif()
-endif()
-
-# ------------------------------------------------------------------------------
 set(PLUGIN_NAME "media_kit_libs_windows_video_plugin")
 
 add_library(
@@ -207,11 +160,5 @@ target_link_libraries(
 set(
   media_kit_libs_windows_video_bundled_libraries
   "${LIBMPV_SRC}/libmpv-2.dll"
-  "${ANGLE_SRC}/d3dcompiler_47.dll"
-  "${ANGLE_SRC}/libEGL.dll"
-  "${ANGLE_SRC}/libGLESv2.dll"
-  "${ANGLE_SRC}/vk_swiftshader.dll"
-  "${ANGLE_SRC}/vulkan-1.dll"
-  "${ANGLE_SRC}/zlib.dll"
   PARENT_SCOPE
 )
