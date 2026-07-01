@@ -66,7 +66,10 @@ VideoOutput::VideoOutput(int64_t handle,
         // Create render context.
         auto status =
             mpv_render_context_create(&render_context_, handle_, params);
-        if (status != 0 && !configuration_.render_backend.empty()) {
+        const auto allow_backend_fallback =
+            !configuration_.render_backend.empty() &&
+            configuration_.render_backend != "gpu-next";
+        if (status != 0 && allow_backend_fallback) {
           params[2].type = MPV_RENDER_PARAM_INVALID;
           params[2].data = nullptr;
           std::cout << "media_kit: VideoOutput: Falling back to default mpv "
@@ -74,6 +77,12 @@ VideoOutput::VideoOutput(int64_t handle,
                     << std::endl;
           status =
               mpv_render_context_create(&render_context_, handle_, params);
+        } else if (status != 0 && !configuration_.render_backend.empty()) {
+          std::cout << "media_kit: VideoOutput: Requested mpv render backend "
+                    << configuration_.render_backend
+                    << " failed with status " << status
+                    << "; not falling back to default gpu backend."
+                    << std::endl;
         }
         if (status == 0) {
           mpv_render_context_set_update_callback(

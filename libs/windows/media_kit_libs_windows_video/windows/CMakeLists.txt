@@ -46,49 +46,125 @@ function(download_and_verify url md5 locationForArchive)
   endif()
 endfunction()
 
-function(check_directory_exists_and_not_empty dir result_var)
-  # Check if the directory exists
-  if(EXISTS "${dir}")
-    # Check if the directory is not empty
-    file(GLOB dir_contents "${dir}/*")
+function(check_libmpv_extraction dir result_var)
+  set(required_files
+    "${dir}/libmpv-2.dll"
+    "${dir}/libmpv.dll.a"
+    "${dir}/include/client.h"
+    "${dir}/include/render.h"
+    "${dir}/include/render_d3d11.h"
+  )
+  set(is_valid TRUE)
 
-    if(dir_contents)
-      set(${result_var} TRUE PARENT_SCOPE)
-    else()
-      set(${result_var} FALSE PARENT_SCOPE)
-      message(STATUS "Directory ${dir} exists but is empty!")
+  foreach(required_file IN LISTS required_files)
+    if(NOT EXISTS "${required_file}")
+      set(is_valid FALSE)
+      message(STATUS "Required libmpv file is missing: ${required_file}")
     endif()
-  else()
-    set(${result_var} FALSE PARENT_SCOPE)
-    message(STATUS "Directory ${dir} does not exist!")
-  endif()
+  endforeach()
+
+  set(${result_var} ${is_valid} PARENT_SCOPE)
 endfunction()
 
 # Detect architecture and set appropriate libmpv archive
 if(${FLUTTER_TARGET_PLATFORM} STREQUAL "windows-x64")
   set(LIBMPV_ARCH "x86_64")
-  set(LIBMPV "mpv-dev-x86_64-20260630-git-5b0a916.7z")
-  set(LIBMPV_MD5 "7efb6a353e4cb20e59522adc4cea9c57")
+  set(LIBMPV "mpv-dev-x86_64-20260701-git-b5d8a15.7z")
+  set(LIBMPV_MD5 "b67a3686e5be00579544dba4e2123f3a")
 else()
   set(LIBMPV_ARCH "aarch64")
   set(LIBMPV "mpv-dev-aarch64-20260219-git-d93c669.7z")
   set(LIBMPV_MD5 "0612bbd955aca27ef6f7052db852727d")
 endif()
 
-# Download URL for the libmpv archive from the latest release
-set(LIBMPV_URL "https://github.com/bota-official/bota/releases/download/v0.5.1/${LIBMPV}")
+# Download URL for the libmpv archive from the latest release.
+set(LIBMPV_URL "https://github.com/bota-official/bota/releases/download/v0.2.5/${LIBMPV}")
+
+# Local testing override. Drop a matching mpv-dev-<arch>-*.7z into this folder,
+# or pass -DMEDIA_KIT_LIBMPV_LOCAL_ARCHIVE=/path/to/mpv-dev-<arch>-*.7z.
+set(MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE "" CACHE FILEPATH "Local libmpv .7z archive for Windows video testing.")
+set(MEDIA_KIT_LIBMPV_LOCAL_DIR "${CMAKE_CURRENT_LIST_DIR}/local_libmpv" CACHE PATH "Directory containing local libmpv .7z archives.")
 
 # Download location of the libmpv archive.
 set(LIBMPV_ARCHIVE "${CMAKE_BINARY_DIR}/${LIBMPV}")
 set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv")
+set(LIBMPV_STAMP "${LIBMPV_SRC}/.media_kit_libmpv_archive")
+set(LIBMPV_SOURCE "remote")
 
-download_and_verify(
-  ${LIBMPV_URL}
-  ${LIBMPV_MD5}
-  ${LIBMPV_ARCHIVE}
-)
+if(MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE)
+  get_filename_component(MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE_ABS "${MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE}" ABSOLUTE)
 
-check_directory_exists_and_not_empty(${LIBMPV_SRC} LIBMPV_SRC_VALID)
+  if(NOT EXISTS "${MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE_ABS}")
+    message(FATAL_ERROR "MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE does not exist: ${MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE_ABS}")
+  endif()
+
+  set(LIBMPV_SOURCE "local")
+  set(LIBMPV_ARCHIVE "${MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE_ABS}")
+else()
+  file(GLOB MEDIA_KIT_LIBMPV_LOCAL_ARCHIVES CONFIGURE_DEPENDS "${MEDIA_KIT_LIBMPV_LOCAL_DIR}/mpv-dev-${LIBMPV_ARCH}-*.7z")
+
+  if(MEDIA_KIT_LIBMPV_LOCAL_ARCHIVES)
+    list(LENGTH MEDIA_KIT_LIBMPV_LOCAL_ARCHIVES MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE_COUNT)
+    set(MEDIA_KIT_LIBMPV_SELECTED_ARCHIVE "")
+    set(MEDIA_KIT_LIBMPV_SELECTED_TIMESTAMP "")
+
+    foreach(MEDIA_KIT_LIBMPV_CANDIDATE IN LISTS MEDIA_KIT_LIBMPV_LOCAL_ARCHIVES)
+      file(TIMESTAMP "${MEDIA_KIT_LIBMPV_CANDIDATE}" MEDIA_KIT_LIBMPV_CANDIDATE_TIMESTAMP "%Y%m%d%H%M%S" UTC)
+
+      if(NOT MEDIA_KIT_LIBMPV_SELECTED_ARCHIVE OR MEDIA_KIT_LIBMPV_CANDIDATE_TIMESTAMP STRGREATER MEDIA_KIT_LIBMPV_SELECTED_TIMESTAMP)
+        set(MEDIA_KIT_LIBMPV_SELECTED_ARCHIVE "${MEDIA_KIT_LIBMPV_CANDIDATE}")
+        set(MEDIA_KIT_LIBMPV_SELECTED_TIMESTAMP "${MEDIA_KIT_LIBMPV_CANDIDATE_TIMESTAMP}")
+      endif()
+    endforeach()
+
+    set(LIBMPV_ARCHIVE "${MEDIA_KIT_LIBMPV_SELECTED_ARCHIVE}")
+
+    if(MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE_COUNT GREATER 1)
+      message(STATUS "Found ${MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE_COUNT} local libmpv archives in ${MEDIA_KIT_LIBMPV_LOCAL_DIR}; using newest modified archive ${LIBMPV_ARCHIVE}. Set MEDIA_KIT_LIBMPV_LOCAL_ARCHIVE to choose explicitly.")
+    endif()
+
+    set(LIBMPV_SOURCE "local")
+  endif()
+endif()
+
+if(LIBMPV_SOURCE STREQUAL "local")
+  get_filename_component(LIBMPV "${LIBMPV_ARCHIVE}" NAME)
+
+  if(NOT LIBMPV MATCHES "^mpv-dev-${LIBMPV_ARCH}-.*\\.7z$")
+    message(WARNING "Local libmpv archive name does not match the current target architecture (${LIBMPV_ARCH}): ${LIBMPV}")
+  endif()
+
+  file(MD5 "${LIBMPV_ARCHIVE}" LIBMPV_MD5)
+  message(STATUS "Using local libmpv archive: ${LIBMPV_ARCHIVE}")
+else()
+  message(STATUS "Using remote libmpv archive: ${LIBMPV_URL}")
+endif()
+
+set(LIBMPV_ID "${LIBMPV_SOURCE}|${LIBMPV}|${LIBMPV_MD5}")
+
+if(EXISTS "${LIBMPV_SRC}")
+  if(EXISTS "${LIBMPV_STAMP}")
+    file(READ "${LIBMPV_STAMP}" LIBMPV_EXTRACTED_ID)
+    string(STRIP "${LIBMPV_EXTRACTED_ID}" LIBMPV_EXTRACTED_ID)
+  else()
+    set(LIBMPV_EXTRACTED_ID "")
+  endif()
+
+  if(NOT LIBMPV_EXTRACTED_ID STREQUAL LIBMPV_ID)
+    message(STATUS "Removing stale libmpv extraction from ${LIBMPV_SRC}.")
+    file(REMOVE_RECURSE "${LIBMPV_SRC}")
+  endif()
+endif()
+
+if(LIBMPV_SOURCE STREQUAL "remote")
+  download_and_verify(
+    ${LIBMPV_URL}
+    ${LIBMPV_MD5}
+    ${LIBMPV_ARCHIVE}
+  )
+endif()
+
+check_libmpv_extraction(${LIBMPV_SRC} LIBMPV_SRC_VALID)
 
 # Find 7zip for extraction (preferred for .7z files)
 find_program(SEVENZ_EXECUTABLE NAMES 7z 7za)
@@ -96,7 +172,11 @@ find_program(SEVENZ_EXECUTABLE NAMES 7z 7za)
 # Extract the libmpv archive.
 if(NOT LIBMPV_SRC_VALID)
   message(STATUS "Extracting ${LIBMPV}...")
+  if(EXISTS "${LIBMPV_SRC}")
+    file(REMOVE_RECURSE "${LIBMPV_SRC}")
+  endif()
   make_directory("${LIBMPV_SRC}")
+  file(WRITE "${LIBMPV_STAMP}" "${LIBMPV_ID}\n")
   add_custom_target("${PROJECT_NAME}_LIBMPV_EXTRACT" ALL)
   
   if(SEVENZ_EXECUTABLE)
