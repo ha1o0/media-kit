@@ -34,6 +34,25 @@ VideoOutput::VideoOutput(int64_t handle,
   auto future = thread_pool_ref_->Post([&]() {
     mpv_set_option_string(handle_, "video-sync", "audio");
     mpv_set_option_string(handle_, "video-timing-offset", "0");
+    if (!configuration_.initial_properties.empty()) {
+      std::cout << "media_kit: VideoOutput: Applying "
+                << configuration_.initial_properties.size()
+                << " initial mpv properties before render context."
+                << std::endl;
+      for (const auto& property : configuration_.initial_properties) {
+        if (IsPrivateInitialProperty(property.first)) {
+          continue;
+        }
+        const auto status = mpv_set_option_string(
+            handle_, property.first.c_str(), property.second.c_str());
+        if (status != 0) {
+          std::cout << "media_kit: VideoOutput: Failed to apply initial mpv "
+                       "property "
+                    << property.first << "=" << property.second
+                    << " (status=" << status << ")." << std::endl;
+        }
+      }
+    }
     // First try to initialize native D3D11 hardware rendering, use S/W API as
     // fallback.
     auto is_hardware_acceleration_enabled = false;
@@ -48,6 +67,8 @@ VideoOutput::VideoOutput(int64_t handle,
         d3d11_renderer_ = std::make_unique<D3D11Renderer>(
             static_cast<int32_t>(width_.value_or(1)),
             static_cast<int32_t>(height_.value_or(1)), flutter_adapter);
+        d3d11_renderer_->SetTextureSdrCompensationEnabled(
+            IsTextureSdrCompensationEnabled());
         mpv_d3d11_init_params d3d11_init_params{
             d3d11_renderer_->device(),
         };
@@ -199,8 +220,6 @@ void VideoOutput::Render() {
     bool frame_available = false;
     // H/W
     if (d3d11_renderer_ != nullptr) {
-      d3d11_renderer_->SetHdrToneMappingEnabled(
-          ShouldApplyNativeHdrToneMapping());
       mpv_d3d11_fbo fbo{
           d3d11_renderer_->render_target(),
           d3d11_renderer_->width(),
@@ -211,8 +230,19 @@ void VideoOutput::Render() {
             {MPV_RENDER_PARAM_D3D11_FBO, &fbo},
             {MPV_RENDER_PARAM_INVALID, nullptr},
         };
-        mpv_render_context_render(render_context_, params);
-        frame_available = d3d11_renderer_->ProducerCommit();
+        const auto render_status =
+            mpv_render_context_render(render_context_, params);
+        if (render_status == 0) {
+          frame_available = d3d11_renderer_->ProducerCommit();
+        }
+        if (render_debug_log_count_ < 8 || render_status != 0 ||
+            !frame_available) {
+          std::cout << "media_kit: VideoOutput: D3D11 render status="
+                    << render_status << ", frame_available="
+                    << frame_available << ", size=" << fbo.w << "x" << fbo.h
+                    << std::endl;
+          render_debug_log_count_++;
+        }
       }
     }
     // S/W
@@ -229,57 +259,42 @@ void VideoOutput::Render() {
           {MPV_RENDER_PARAM_SW_POINTER, pixel_buffer_.get()},
           {MPV_RENDER_PARAM_INVALID, nullptr},
       };
-      mpv_render_context_render(render_context_, params);
-      frame_available = true;
+      const auto render_status = mpv_render_context_render(render_context_, params);
+      frame_available = render_status == 0;
+      if (render_debug_log_count_ < 8 || render_status != 0) {
+        std::cout << "media_kit: VideoOutput: S/W render status="
+                  << render_status << ", frame_available=" << frame_available
+                  << std::endl;
+        render_debug_log_count_++;
+      }
     }
     if (!frame_available) return;
     try {
       // Notify Flutter that a new frame is available.
       registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
+      mpv_render_context_report_swap(render_context_);
     } catch (...) {
       // Prevent any redundant exceptions if the texture is unregistered etc.
     }
   }
 }
 
-bool VideoOutput::ShouldApplyNativeHdrToneMapping() {
-  char* shader_list = nullptr;
-  if (mpv_get_property(handle_, "glsl-shaders", MPV_FORMAT_STRING,
-                       &shader_list) != 0 ||
-      shader_list == nullptr) {
-    return false;
-  }
+bool VideoOutput::IsTextureSdrCompensationEnabled() const {
+  const auto option =
+      configuration_.initial_properties.find("bota-hdr-texture-sdr-compensation");
+  return option != configuration_.initial_properties.end() &&
+         option->second == "yes";
+}
 
-  const std::string shaders(shader_list);
-  mpv_free(shader_list);
-  if (shaders.find("bota_hdr_tone_mapping.glsl") == std::string::npos) {
-    return false;
-  }
-
-  char* gamma = nullptr;
-  if (mpv_get_property(handle_, "video-params/gamma", MPV_FORMAT_STRING,
-                       &gamma) == 0 &&
-      gamma != nullptr) {
-    const std::string value(gamma);
-    mpv_free(gamma);
-    if (value == "pq" || value == "smpte2084" || value == "hlg" ||
-        value == "arib-std-b67") {
-      return true;
-    }
-  } else if (gamma != nullptr) {
-    mpv_free(gamma);
-  }
-
-  int64_t dv_profile = 0;
-  return mpv_get_property(handle_, "current-tracks/video/dolby-vision-profile",
-                          MPV_FORMAT_INT64, &dv_profile) == 0 &&
-         dv_profile > 0;
+bool VideoOutput::IsPrivateInitialProperty(const std::string& name) const {
+  return name.rfind("bota-", 0) == 0;
 }
 
 void VideoOutput::SetTextureUpdateCallback(
     std::function<void(int64_t, int64_t, int64_t)> callback) {
   texture_update_callback_ = callback;
   texture_update_callback_(texture_id_, GetVideoWidth(), GetVideoHeight());
+  NotifyRender();
 }
 
 void VideoOutput::SetSize(std::optional<int64_t> width,

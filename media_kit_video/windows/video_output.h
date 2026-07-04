@@ -9,6 +9,7 @@
 #ifndef VIDEO_OUTPUT_H_
 #define VIDEO_OUTPUT_H_
 
+#include <map>
 #include <optional>
 #include <string>
 
@@ -31,15 +32,19 @@ typedef struct _VideoOutputConfiguration {
   std::optional<int64_t> height;
   bool enable_hardware_acceleration;
   std::string render_backend;
+  std::map<std::string, std::string> initial_properties;
 
   _VideoOutputConfiguration(std::optional<int64_t> width = std::nullopt,
                             std::optional<int64_t> height = std::nullopt,
                             bool enable_hardware_acceleration = true,
-                            std::string render_backend = "")
+                            std::string render_backend = "",
+                            std::map<std::string, std::string>
+                                initial_properties = {})
       : width(width),
         height(height),
         enable_hardware_acceleration(enable_hardware_acceleration),
-        render_backend(render_backend) {}
+        render_backend(render_backend),
+        initial_properties(initial_properties) {}
 } VideoOutputConfiguration;
 
 class VideoOutput {
@@ -89,7 +94,9 @@ class VideoOutput {
 
   void Resize(int64_t required_width, int64_t required_height);
 
-  bool ShouldApplyNativeHdrToneMapping();
+  bool IsTextureSdrCompensationEnabled() const;
+
+  bool IsPrivateInitialProperty(const std::string& name) const;
 
   int64_t GetVideoWidth();
 
@@ -102,6 +109,7 @@ class VideoOutput {
   mpv_handle* handle_ = nullptr;
   mpv_render_context* render_context_ = nullptr;
   int64_t texture_id_ = 0;
+  int32_t render_debug_log_count_ = 0;
   flutter::PluginRegistrarWindows* registrar_ = nullptr;
   ThreadPool* thread_pool_ref_ = nullptr;
   // For preventing any asynchronous operations (primarily texture objects

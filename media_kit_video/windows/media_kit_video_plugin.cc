@@ -9,6 +9,7 @@
 #include "utils.h"
 
 #include <Windows.h>
+#include <variant>
 
 namespace media_kit_video {
 
@@ -131,6 +132,24 @@ void MediaKitVideoPlugin::HandleMethodCall(
         configuration_enable_hardware_acceleration;
     if (configuration_render_backend.compare("null") != 0) {
       configuration_value.render_backend = configuration_render_backend;
+    }
+    const auto initial_properties_key =
+        flutter::EncodableValue("initialProperties");
+    const auto initial_properties_it =
+        configuration.find(initial_properties_key);
+    if (initial_properties_it != configuration.end() &&
+        std::holds_alternative<flutter::EncodableMap>(
+            initial_properties_it->second)) {
+      const auto& initial_properties =
+          std::get<flutter::EncodableMap>(initial_properties_it->second);
+      for (const auto& property : initial_properties) {
+        if (std::holds_alternative<std::string>(property.first) &&
+            std::holds_alternative<std::string>(property.second)) {
+          configuration_value.initial_properties.emplace(
+              std::get<std::string>(property.first),
+              std::get<std::string>(property.second));
+        }
+      }
     }
 
     video_output_manager_->Create(

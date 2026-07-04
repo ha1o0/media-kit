@@ -27,7 +27,7 @@ class D3D11Renderer {
 
   ID3D11Device* device() const { return d3d_11_device_.Get(); }
   ID3D11Texture2D* render_target() const {
-    return hdr_tone_mapping_enabled_ && mpv_render_target_
+    return texture_sdr_compensation_enabled_ && mpv_render_target_
                ? mpv_render_target_.Get()
                : (mailbox_swap_chain_ ? mailbox_swap_chain_->RenderTarget()
                                        : nullptr);
@@ -39,7 +39,7 @@ class D3D11Renderer {
   ~D3D11Renderer();
 
   void SetSize(int32_t width, int32_t height);
-  void SetHdrToneMappingEnabled(bool enabled);
+  void SetTextureSdrCompensationEnabled(bool enabled);
   bool ProducerCommit();
   HANDLE ConsumerAcquire();
   HANDLE ReadHandleSnapshot() const;
@@ -47,22 +47,23 @@ class D3D11Renderer {
  private:
   bool CreateD3D11Device(IDXGIAdapter* flutter_adapter);
   bool CreateMailbox();
-  bool EnsureHdrToneMappingResources();
-  bool ApplyHdrToneMapping(ID3D11Texture2D* output_texture);
-  void ReleaseHdrToneMappingResources();
+  bool EnsureTextureSdrCompensationResources();
+  bool ApplyTextureSdrCompensation(ID3D11Texture2D* output_texture);
+  void ReleaseTextureSdrCompensationResources();
 
   int32_t width_ = 1;
   int32_t height_ = 1;
-  bool hdr_tone_mapping_enabled_ = false;
+  bool texture_sdr_compensation_enabled_ = false;
+  int32_t texture_sdr_compensation_log_count_ = 0;
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_11_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d_11_device_context_;
   Microsoft::WRL::ComPtr<MailboxSwapChain> mailbox_swap_chain_;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> mpv_render_target_;
   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mpv_render_target_srv_;
-  Microsoft::WRL::ComPtr<ID3D11VertexShader> hdr_vertex_shader_;
-  Microsoft::WRL::ComPtr<ID3D11PixelShader> hdr_pixel_shader_;
-  Microsoft::WRL::ComPtr<ID3D11SamplerState> hdr_sampler_state_;
+  Microsoft::WRL::ComPtr<ID3D11VertexShader> texture_sdr_vertex_shader_;
+  Microsoft::WRL::ComPtr<ID3D11PixelShader> texture_sdr_pixel_shader_;
+  Microsoft::WRL::ComPtr<ID3D11SamplerState> texture_sdr_sampler_state_;
 };
 
 #endif  // D3D11_RENDERER_H_

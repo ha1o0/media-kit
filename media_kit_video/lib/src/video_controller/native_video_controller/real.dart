@@ -56,9 +56,18 @@ class NativeVideoController extends PlatformVideoController {
     await platform.setProperty(key, value, waitForInitialization: false);
   }
 
-  Future<void> setProperties(Map<String, String> properties) async {
+  bool _isPrivateInitialProperty(String key) => key.startsWith('bota-');
+
+  Future<void> setProperties(
+    Map<String, String> properties, {
+    bool skipPrivateInitialProperties = false,
+  }) async {
     // ORDER IS IMPORTANT.
     for (final entry in properties.entries) {
+      if (skipPrivateInitialProperties &&
+          _isPrivateInitialProperty(entry.key)) {
+        continue;
+      }
       await setProperty(entry.key, entry.value);
     }
   }
@@ -160,6 +169,7 @@ class NativeVideoController extends PlatformVideoController {
         ...configuration.initialProperties,
         'vid': 'auto',
       },
+      skipPrivateInitialProperties: true,
     );
 
     // Wait until first texture ID is received.
@@ -230,20 +240,65 @@ class NativeVideoController extends PlatformVideoController {
     Map<String, String> initialProperties = const {},
   }) async {
     final handle = await player.handle;
+    final previousTextureId = id.value;
+    final previousRect = rect.value;
+    final restoreWidth = videoParamsWidth ??
+        (previousRect != null && previousRect.width > 0
+            ? previousRect.width.round()
+            : null) ??
+        player.state.width ??
+        width;
+    final restoreHeight = videoParamsHeight ??
+        (previousRect != null && previousRect.height > 0
+            ? previousRect.height.round()
+            : null) ??
+        player.state.height ??
+        height;
     if (initialProperties.isNotEmpty) {
-      await setProperties(initialProperties);
+      await setProperties(
+        initialProperties,
+        skipPrivateInitialProperties: true,
+      );
     }
 
-    await _createVideoOutput(handle);
+    final textureReadyCompleter = Completer<void>();
+    void textureListener() {
+      final value = id.value;
+      if (value != null &&
+          value != previousTextureId &&
+          !textureReadyCompleter.isCompleted) {
+        textureReadyCompleter.complete();
+      }
+    }
 
-    final currentWidth = videoParamsWidth ?? player.state.width ?? width;
-    final currentHeight = videoParamsHeight ?? player.state.height ?? height;
+    id.addListener(textureListener);
+    await _createVideoOutput(
+      handle,
+      initialProperties: initialProperties,
+      width: restoreWidth,
+      height: restoreHeight,
+    );
+    try {
+      await textureReadyCompleter.future.timeout(
+        const Duration(seconds: 2),
+      );
+    } catch (_) {
+      // Continue with size restoration even if the native texture notification
+      // is delayed; this keeps recreate best-effort on older backends.
+    } finally {
+      id.removeListener(textureListener);
+    }
+
+    final currentWidth = restoreWidth;
+    final currentHeight = restoreHeight;
     if (currentWidth == null || currentHeight == null) return;
 
     for (final delay in const [
+      Duration(milliseconds: 0),
       Duration(milliseconds: 120),
       Duration(milliseconds: 300),
       Duration(milliseconds: 700),
+      Duration(milliseconds: 1200),
     ]) {
       await Future.delayed(delay);
       await _channel.invokeMethod(
@@ -257,17 +312,28 @@ class NativeVideoController extends PlatformVideoController {
     }
   }
 
-  Future<void> _createVideoOutput(int handle) async {
+  Future<void> _createVideoOutput(
+    int handle, {
+    Map<String, String> initialProperties = const {},
+    int? width,
+    int? height,
+  }) async {
+    final effectiveInitialProperties = initialProperties.isEmpty
+        ? configuration.initialProperties
+        : initialProperties;
+    final effectiveWidth = width ?? configuration.width;
+    final effectiveHeight = height ?? configuration.height;
     await _channel.invokeMethod(
       'VideoOutputManager.Create',
       {
         'handle': handle.toString(),
         'configuration': {
-          'width': configuration.width.toString(),
-          'height': configuration.height.toString(),
+          'width': effectiveWidth.toString(),
+          'height': effectiveHeight.toString(),
           'enableHardwareAcceleration':
               configuration.enableHardwareAcceleration,
           'renderBackend': configuration.renderBackend?.toString() ?? 'null',
+          'initialProperties': effectiveInitialProperties,
         },
       },
     );

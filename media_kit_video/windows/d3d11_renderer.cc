@@ -21,7 +21,7 @@
 
 namespace {
 
-constexpr char kHdrToneMappingShader[] = R"(
+constexpr char kTextureSdrCompensationShader[] = R"(
 struct VSOut {
   float4 pos : SV_POSITION;
   float2 uv : TEXCOORD0;
@@ -50,26 +50,27 @@ SamplerState source_sampler : register(s0);
 float4 PSMain(VSOut input) : SV_TARGET {
   float4 color = source_texture.Sample(source_sampler, input.uv);
   float3 rgb = saturate(color.rgb);
+
   float y = max(dot(rgb, float3(0.2126, 0.7152, 0.0722)), 0.00001);
-  float lifted_y = pow(y, 0.82);
-  float shadow_gate = smoothstep(0.015, 0.08, y);
-  float highlight_gate = 1.0 - smoothstep(0.38, 0.78, y);
-  float lift_amount = 0.52 * shadow_gate * highlight_gate;
+  float lifted_y = pow(y, 0.70);
+  float shadow_gate = smoothstep(0.012, 0.12, y);
+  float highlight_gate = 1.0 - smoothstep(0.58, 0.92, y);
+  float lift_amount = 0.50 * shadow_gate * highlight_gate;
   float target_y = lerp(y, lifted_y, lift_amount);
-  float gain = min(target_y / y, 1.42);
+  float gain = min(target_y / y, 1.40);
+
   float max_channel = max(rgb.r, max(rgb.g, rgb.b));
   if (max_channel > 0.00001) {
     gain = min(gain, 0.985 / max_channel);
   }
-  float3 lifted_rgb = rgb * gain;
-  float lifted_luma = dot(lifted_rgb, float3(0.2126, 0.7152, 0.0722));
-  float saturation = lerp(1.0, 0.94, smoothstep(1.06, 1.32, gain));
-  lifted_rgb = lifted_luma + (lifted_rgb - lifted_luma) * saturation;
-  float red_excess = lifted_rgb.r - max(lifted_rgb.g, lifted_rgb.b);
-  float red_balance = smoothstep(0.015, 0.16, red_excess) *
-                      smoothstep(1.02, 1.28, gain);
-  lifted_rgb.r *= 1.0 - 0.035 * red_balance;
-  return float4(saturate(lifted_rgb), color.a);
+
+  float3 corrected = rgb * gain;
+  float corrected_y = dot(corrected, float3(0.2126, 0.7152, 0.0722));
+  float saturation = lerp(1.0, 0.90, smoothstep(1.02, 1.36, gain));
+  saturation *= lerp(0.94, 1.0, smoothstep(0.10, 0.42, y));
+  corrected = corrected_y + (corrected - corrected_y) * saturation;
+
+  return float4(saturate(corrected), color.a);
 }
 )";
 
@@ -78,11 +79,12 @@ bool CompileShader(const char* entry_point,
                    ID3DBlob** blob) {
   Microsoft::WRL::ComPtr<ID3DBlob> errors;
   const HRESULT hr = D3DCompile(
-      kHdrToneMappingShader, strlen(kHdrToneMappingShader), nullptr, nullptr,
-      nullptr, entry_point, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob,
-      errors.GetAddressOf());
+      kTextureSdrCompensationShader, strlen(kTextureSdrCompensationShader),
+      nullptr, nullptr, nullptr, entry_point, target,
+      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob, errors.GetAddressOf());
   if (FAILED(hr)) {
-    std::cout << "media_kit: D3D11Renderer: HDR shader compile failed ("
+    std::cout << "media_kit: D3D11Renderer: texture SDR shader compile "
+                 "failed ("
               << entry_point << ", hr=0x" << std::hex << hr << std::dec
               << ")";
     if (errors) {
@@ -110,7 +112,7 @@ D3D11Renderer::D3D11Renderer(int32_t width,
 }
 
 D3D11Renderer::~D3D11Renderer() {
-  ReleaseHdrToneMappingResources();
+  ReleaseTextureSdrCompensationResources();
   mailbox_swap_chain_.Reset();
   d3d_11_device_context_.Reset();
   d3d_11_device_.Reset();
@@ -127,41 +129,55 @@ void D3D11Renderer::SetSize(int32_t width, int32_t height) {
                 << std::hex << hr << std::dec << ")" << std::endl;
     }
   }
-  ReleaseHdrToneMappingResources();
+  ReleaseTextureSdrCompensationResources();
+  if (texture_sdr_compensation_enabled_ &&
+      !EnsureTextureSdrCompensationResources()) {
+    texture_sdr_compensation_enabled_ = false;
+    std::cout << "media_kit: D3D11Renderer: texture SDR compensation "
+                 "disabled after resize because resources could not be "
+                 "recreated."
+              << std::endl;
+  }
 }
 
-void D3D11Renderer::SetHdrToneMappingEnabled(bool enabled) {
-  if (hdr_tone_mapping_enabled_ == enabled) return;
-  hdr_tone_mapping_enabled_ = enabled;
+void D3D11Renderer::SetTextureSdrCompensationEnabled(bool enabled) {
+  if (texture_sdr_compensation_enabled_ == enabled) return;
+  texture_sdr_compensation_enabled_ = enabled;
   if (enabled) {
-    if (!EnsureHdrToneMappingResources()) {
-      hdr_tone_mapping_enabled_ = false;
-      ReleaseHdrToneMappingResources();
-      std::cout << "media_kit: D3D11Renderer: Native HDR tone mapping "
+    if (!EnsureTextureSdrCompensationResources()) {
+      texture_sdr_compensation_enabled_ = false;
+      ReleaseTextureSdrCompensationResources();
+      std::cout << "media_kit: D3D11Renderer: texture SDR compensation "
                    "failed to initialize; using direct output."
                 << std::endl;
       return;
     }
-    std::cout << "media_kit: D3D11Renderer: Native HDR tone mapping enabled."
+    std::cout << "media_kit: D3D11Renderer: texture SDR compensation enabled."
               << std::endl;
   } else {
-    ReleaseHdrToneMappingResources();
-    std::cout << "media_kit: D3D11Renderer: Native HDR tone mapping disabled."
+    ReleaseTextureSdrCompensationResources();
+    std::cout << "media_kit: D3D11Renderer: texture SDR compensation disabled."
               << std::endl;
   }
 }
 
 bool D3D11Renderer::ProducerCommit() {
-  if (mailbox_swap_chain_) {
-    if (hdr_tone_mapping_enabled_) {
-      ID3D11Texture2D* output = mailbox_swap_chain_->RenderTarget();
-      if (!ApplyHdrToneMapping(output)) {
-        return false;
-      }
+  if (texture_sdr_compensation_enabled_) {
+    ID3D11Texture2D* output = mailbox_swap_chain_
+                                  ? mailbox_swap_chain_->RenderTarget()
+                                  : nullptr;
+    if (!ApplyTextureSdrCompensation(output)) {
+      return false;
     }
-    return mailbox_swap_chain_->ProducerCommit();
+    if (texture_sdr_compensation_log_count_ < 4) {
+      std::cout << "media_kit: D3D11Renderer: texture SDR compensation pass "
+                   "applied, size="
+                << width_ << "x" << height_ << std::endl;
+      texture_sdr_compensation_log_count_++;
+    }
   }
-  return false;
+
+  return mailbox_swap_chain_ ? mailbox_swap_chain_->ProducerCommit() : false;
 }
 
 HANDLE D3D11Renderer::ConsumerAcquire() {
@@ -236,7 +252,7 @@ bool D3D11Renderer::CreateMailbox() {
   return true;
 }
 
-bool D3D11Renderer::EnsureHdrToneMappingResources() {
+bool D3D11Renderer::EnsureTextureSdrCompensationResources() {
   if (!d3d_11_device_ || width_ <= 0 || height_ <= 0) return false;
 
   if (!mpv_render_target_) {
@@ -256,8 +272,8 @@ bool D3D11Renderer::EnsureHdrToneMappingResources() {
     HRESULT hr = d3d_11_device_->CreateTexture2D(
         &desc, nullptr, mpv_render_target_.GetAddressOf());
     if (FAILED(hr)) {
-      std::cout << "media_kit: D3D11Renderer: HDR texture create failed "
-                   "(hr=0x"
+      std::cout << "media_kit: D3D11Renderer: texture SDR target create "
+                   "failed (hr=0x"
                 << std::hex << hr << std::dec << ")" << std::endl;
       return false;
     }
@@ -266,14 +282,18 @@ bool D3D11Renderer::EnsureHdrToneMappingResources() {
         mpv_render_target_.Get(), nullptr,
         mpv_render_target_srv_.GetAddressOf());
     if (FAILED(hr)) {
-      std::cout << "media_kit: D3D11Renderer: HDR SRV create failed (hr=0x"
+      std::cout << "media_kit: D3D11Renderer: texture SDR SRV create failed "
+                   "(hr=0x"
                 << std::hex << hr << std::dec << ")" << std::endl;
-      ReleaseHdrToneMappingResources();
+      ReleaseTextureSdrCompensationResources();
       return false;
     }
   }
 
-  if (!hdr_vertex_shader_ || !hdr_pixel_shader_) {
+  if (!texture_sdr_vertex_shader_ || !texture_sdr_pixel_shader_) {
+    texture_sdr_vertex_shader_.Reset();
+    texture_sdr_pixel_shader_.Reset();
+
     Microsoft::WRL::ComPtr<ID3DBlob> vs_blob;
     Microsoft::WRL::ComPtr<ID3DBlob> ps_blob;
     if (!CompileShader("VSMain", "vs_4_0", vs_blob.GetAddressOf()) ||
@@ -283,26 +303,26 @@ bool D3D11Renderer::EnsureHdrToneMappingResources() {
 
     HRESULT hr = d3d_11_device_->CreateVertexShader(
         vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr,
-        hdr_vertex_shader_.GetAddressOf());
+        texture_sdr_vertex_shader_.GetAddressOf());
     if (FAILED(hr)) {
-      std::cout << "media_kit: D3D11Renderer: HDR vertex shader create failed "
-                   "(hr=0x"
+      std::cout << "media_kit: D3D11Renderer: texture SDR vertex shader "
+                   "create failed (hr=0x"
                 << std::hex << hr << std::dec << ")" << std::endl;
       return false;
     }
 
     hr = d3d_11_device_->CreatePixelShader(
         ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr,
-        hdr_pixel_shader_.GetAddressOf());
+        texture_sdr_pixel_shader_.GetAddressOf());
     if (FAILED(hr)) {
-      std::cout << "media_kit: D3D11Renderer: HDR pixel shader create failed "
-                   "(hr=0x"
+      std::cout << "media_kit: D3D11Renderer: texture SDR pixel shader "
+                   "create failed (hr=0x"
                 << std::hex << hr << std::dec << ")" << std::endl;
       return false;
     }
   }
 
-  if (!hdr_sampler_state_) {
+  if (!texture_sdr_sampler_state_) {
     D3D11_SAMPLER_DESC desc = {};
     desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -312,10 +332,10 @@ bool D3D11Renderer::EnsureHdrToneMappingResources() {
     desc.MinLOD = 0;
     desc.MaxLOD = D3D11_FLOAT32_MAX;
     const HRESULT hr = d3d_11_device_->CreateSamplerState(
-        &desc, hdr_sampler_state_.GetAddressOf());
+        &desc, texture_sdr_sampler_state_.GetAddressOf());
     if (FAILED(hr)) {
-      std::cout << "media_kit: D3D11Renderer: HDR sampler create failed "
-                   "(hr=0x"
+      std::cout << "media_kit: D3D11Renderer: texture SDR sampler create "
+                   "failed (hr=0x"
                 << std::hex << hr << std::dec << ")" << std::endl;
       return false;
     }
@@ -324,19 +344,23 @@ bool D3D11Renderer::EnsureHdrToneMappingResources() {
   return true;
 }
 
-bool D3D11Renderer::ApplyHdrToneMapping(ID3D11Texture2D* output_texture) {
-  if (!output_texture || !EnsureHdrToneMappingResources()) return false;
+bool D3D11Renderer::ApplyTextureSdrCompensation(
+    ID3D11Texture2D* output_texture) {
+  if (!output_texture || !EnsureTextureSdrCompensationResources()) {
+    return false;
+  }
 
-  Microsoft::WRL::ComPtr<ID3D11RenderTargetView> output_rtv;
-  HRESULT hr = d3d_11_device_->CreateRenderTargetView(
-      output_texture, nullptr, output_rtv.GetAddressOf());
+  Microsoft::WRL::ComPtr<ID3D11RenderTargetView> render_target_view;
+  const HRESULT hr = d3d_11_device_->CreateRenderTargetView(
+      output_texture, nullptr, render_target_view.GetAddressOf());
   if (FAILED(hr)) {
-    std::cout << "media_kit: D3D11Renderer: HDR RTV create failed (hr=0x"
+    std::cout << "media_kit: D3D11Renderer: texture SDR RTV create failed "
+                 "(hr=0x"
               << std::hex << hr << std::dec << ")" << std::endl;
     return false;
   }
 
-  ID3D11RenderTargetView* rtvs[] = {output_rtv.Get()};
+  ID3D11RenderTargetView* rtvs[] = {render_target_view.Get()};
   d3d_11_device_context_->OMSetRenderTargets(1, rtvs, nullptr);
 
   D3D11_VIEWPORT viewport = {};
@@ -349,12 +373,14 @@ bool D3D11Renderer::ApplyHdrToneMapping(ID3D11Texture2D* output_texture) {
   d3d_11_device_context_->RSSetViewports(1, &viewport);
 
   ID3D11ShaderResourceView* srvs[] = {mpv_render_target_srv_.Get()};
-  ID3D11SamplerState* samplers[] = {hdr_sampler_state_.Get()};
+  ID3D11SamplerState* samplers[] = {texture_sdr_sampler_state_.Get()};
   d3d_11_device_context_->IASetInputLayout(nullptr);
   d3d_11_device_context_->IASetPrimitiveTopology(
       D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  d3d_11_device_context_->VSSetShader(hdr_vertex_shader_.Get(), nullptr, 0);
-  d3d_11_device_context_->PSSetShader(hdr_pixel_shader_.Get(), nullptr, 0);
+  d3d_11_device_context_->VSSetShader(texture_sdr_vertex_shader_.Get(),
+                                      nullptr, 0);
+  d3d_11_device_context_->PSSetShader(texture_sdr_pixel_shader_.Get(),
+                                      nullptr, 0);
   d3d_11_device_context_->PSSetShaderResources(0, 1, srvs);
   d3d_11_device_context_->PSSetSamplers(0, 1, samplers);
   d3d_11_device_context_->Draw(3, 0);
@@ -368,7 +394,10 @@ bool D3D11Renderer::ApplyHdrToneMapping(ID3D11Texture2D* output_texture) {
   return true;
 }
 
-void D3D11Renderer::ReleaseHdrToneMappingResources() {
+void D3D11Renderer::ReleaseTextureSdrCompensationResources() {
+  texture_sdr_sampler_state_.Reset();
+  texture_sdr_pixel_shader_.Reset();
+  texture_sdr_vertex_shader_.Reset();
   mpv_render_target_srv_.Reset();
   mpv_render_target_.Reset();
 }
