@@ -89,6 +89,8 @@ class VideoOutput {
 
   void Resize(int64_t required_width, int64_t required_height);
 
+  bool ShouldApplyNativeHdrToneMapping();
+
   int64_t GetVideoWidth();
 
   int64_t GetVideoHeight();

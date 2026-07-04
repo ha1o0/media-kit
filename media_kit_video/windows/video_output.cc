@@ -9,6 +9,7 @@
 #include "video_output.h"
 
 #include <algorithm>
+#include <string>
 
 // Limit the frame size to 1080p in software rendering.
 // This is for performance reasons & to avoid allocating too much memory.
@@ -198,6 +199,8 @@ void VideoOutput::Render() {
     bool frame_available = false;
     // H/W
     if (d3d11_renderer_ != nullptr) {
+      d3d11_renderer_->SetHdrToneMappingEnabled(
+          ShouldApplyNativeHdrToneMapping());
       mpv_d3d11_fbo fbo{
           d3d11_renderer_->render_target(),
           d3d11_renderer_->width(),
@@ -237,6 +240,40 @@ void VideoOutput::Render() {
       // Prevent any redundant exceptions if the texture is unregistered etc.
     }
   }
+}
+
+bool VideoOutput::ShouldApplyNativeHdrToneMapping() {
+  char* shader_list = nullptr;
+  if (mpv_get_property(handle_, "glsl-shaders", MPV_FORMAT_STRING,
+                       &shader_list) != 0 ||
+      shader_list == nullptr) {
+    return false;
+  }
+
+  const std::string shaders(shader_list);
+  mpv_free(shader_list);
+  if (shaders.find("bota_hdr_tone_mapping.glsl") == std::string::npos) {
+    return false;
+  }
+
+  char* gamma = nullptr;
+  if (mpv_get_property(handle_, "video-params/gamma", MPV_FORMAT_STRING,
+                       &gamma) == 0 &&
+      gamma != nullptr) {
+    const std::string value(gamma);
+    mpv_free(gamma);
+    if (value == "pq" || value == "smpte2084" || value == "hlg" ||
+        value == "arib-std-b67") {
+      return true;
+    }
+  } else if (gamma != nullptr) {
+    mpv_free(gamma);
+  }
+
+  int64_t dv_profile = 0;
+  return mpv_get_property(handle_, "current-tracks/video/dolby-vision-profile",
+                          MPV_FORMAT_INT64, &dv_profile) == 0 &&
+         dv_profile > 0;
 }
 
 void VideoOutput::SetTextureUpdateCallback(

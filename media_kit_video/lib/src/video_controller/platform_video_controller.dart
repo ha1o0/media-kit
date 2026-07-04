@@ -51,6 +51,12 @@ abstract class PlatformVideoController {
     int? height,
   });
 
+  /// Recreates the native video output/render context if the platform
+  /// implementation supports it.
+  Future<void> recreate({
+    Map<String, String> initialProperties = const {},
+  }) async {}
+
   /// A [Future] that completes when the first video frame has been rendered.
   Future<void> get waitUntilFirstFrameRendered =>
       waitUntilFirstFrameRenderedCompleter.future;
@@ -120,6 +126,13 @@ class VideoControllerConfiguration {
   /// Default: Platform specific.
   final String? renderBackend;
 
+  /// Native mpv properties that must be applied before the native video output
+  /// render context is created.
+  ///
+  /// This is useful for output color-management options that are not reliably
+  /// reconfigured after libmpv's render context has already been initialized.
+  final Map<String, String> initialProperties;
+
   /// Whether to attach `android.view.Surface` after video parameters are known.
   ///
   /// Default:
@@ -136,6 +149,7 @@ class VideoControllerConfiguration {
     this.scale = 1.0,
     this.enableHardwareAcceleration = true,
     this.renderBackend,
+    this.initialProperties = const {},
     this.androidAttachSurfaceAfterVideoParameters,
   });
 
@@ -148,6 +162,7 @@ class VideoControllerConfiguration {
     int? height,
     bool? enableHardwareAcceleration,
     String? renderBackend,
+    Map<String, String>? initialProperties,
     bool? androidAttachSurfaceAfterVideoParameters,
   }) =>
       VideoControllerConfiguration(
@@ -159,6 +174,7 @@ class VideoControllerConfiguration {
         enableHardwareAcceleration:
             enableHardwareAcceleration ?? this.enableHardwareAcceleration,
         renderBackend: renderBackend ?? this.renderBackend,
+        initialProperties: initialProperties ?? this.initialProperties,
         androidAttachSurfaceAfterVideoParameters:
             androidAttachSurfaceAfterVideoParameters ??
                 this.androidAttachSurfaceAfterVideoParameters,

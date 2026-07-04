@@ -157,6 +157,7 @@ class NativeVideoController extends PlatformVideoController {
       {
         'vo': configuration.vo!,
         'hwdec': configuration.hwdec!,
+        ...configuration.initialProperties,
         'vid': 'auto',
       },
     );
@@ -174,19 +175,7 @@ class NativeVideoController extends PlatformVideoController {
 
     controller.id.addListener(listener);
 
-    await _channel.invokeMethod(
-      'VideoOutputManager.Create',
-      {
-        'handle': handle.toString(),
-        'configuration': {
-          'width': configuration.width.toString(),
-          'height': configuration.height.toString(),
-          'enableHardwareAcceleration':
-              configuration.enableHardwareAcceleration,
-          'renderBackend': configuration.renderBackend?.toString() ?? 'null',
-        },
-      },
-    );
+    await controller._createVideoOutput(handle);
 
     await completer.future;
     controller.id.removeListener(listener);
@@ -234,6 +223,54 @@ class NativeVideoController extends PlatformVideoController {
         },
       );
     }
+  }
+
+  @override
+  Future<void> recreate({
+    Map<String, String> initialProperties = const {},
+  }) async {
+    final handle = await player.handle;
+    if (initialProperties.isNotEmpty) {
+      await setProperties(initialProperties);
+    }
+
+    await _createVideoOutput(handle);
+
+    final currentWidth = videoParamsWidth ?? player.state.width ?? width;
+    final currentHeight = videoParamsHeight ?? player.state.height ?? height;
+    if (currentWidth == null || currentHeight == null) return;
+
+    for (final delay in const [
+      Duration(milliseconds: 120),
+      Duration(milliseconds: 300),
+      Duration(milliseconds: 700),
+    ]) {
+      await Future.delayed(delay);
+      await _channel.invokeMethod(
+        'VideoOutputManager.SetSize',
+        {
+          'handle': handle.toString(),
+          'width': currentWidth.toString(),
+          'height': currentHeight.toString(),
+        },
+      );
+    }
+  }
+
+  Future<void> _createVideoOutput(int handle) async {
+    await _channel.invokeMethod(
+      'VideoOutputManager.Create',
+      {
+        'handle': handle.toString(),
+        'configuration': {
+          'width': configuration.width.toString(),
+          'height': configuration.height.toString(),
+          'enableHardwareAcceleration':
+              configuration.enableHardwareAcceleration,
+          'renderBackend': configuration.renderBackend?.toString() ?? 'null',
+        },
+      },
+    );
   }
 
   /// Disposes the instance. Releases allocated resources back to the system.

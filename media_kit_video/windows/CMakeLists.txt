@@ -60,6 +60,7 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
     # Link to libmpv & D3D11.
     "${LIBMPV_SRC}/libmpv.dll.a"
     d3d11
+    d3dcompiler
     dxgi
   )
 else()

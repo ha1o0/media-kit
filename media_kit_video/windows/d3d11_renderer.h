@@ -11,6 +11,7 @@
 
 #include <Windows.h>
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <dxgi.h>
 #include <dxgi1_2.h>
 #include <wrl.h>
@@ -26,7 +27,10 @@ class D3D11Renderer {
 
   ID3D11Device* device() const { return d3d_11_device_.Get(); }
   ID3D11Texture2D* render_target() const {
-    return mailbox_swap_chain_ ? mailbox_swap_chain_->RenderTarget() : nullptr;
+    return hdr_tone_mapping_enabled_ && mpv_render_target_
+               ? mpv_render_target_.Get()
+               : (mailbox_swap_chain_ ? mailbox_swap_chain_->RenderTarget()
+                                       : nullptr);
   }
 
   explicit D3D11Renderer(int32_t width,
@@ -35,6 +39,7 @@ class D3D11Renderer {
   ~D3D11Renderer();
 
   void SetSize(int32_t width, int32_t height);
+  void SetHdrToneMappingEnabled(bool enabled);
   bool ProducerCommit();
   HANDLE ConsumerAcquire();
   HANDLE ReadHandleSnapshot() const;
@@ -42,13 +47,22 @@ class D3D11Renderer {
  private:
   bool CreateD3D11Device(IDXGIAdapter* flutter_adapter);
   bool CreateMailbox();
+  bool EnsureHdrToneMappingResources();
+  bool ApplyHdrToneMapping(ID3D11Texture2D* output_texture);
+  void ReleaseHdrToneMappingResources();
 
   int32_t width_ = 1;
   int32_t height_ = 1;
+  bool hdr_tone_mapping_enabled_ = false;
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_11_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d_11_device_context_;
   Microsoft::WRL::ComPtr<MailboxSwapChain> mailbox_swap_chain_;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> mpv_render_target_;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mpv_render_target_srv_;
+  Microsoft::WRL::ComPtr<ID3D11VertexShader> hdr_vertex_shader_;
+  Microsoft::WRL::ComPtr<ID3D11PixelShader> hdr_pixel_shader_;
+  Microsoft::WRL::ComPtr<ID3D11SamplerState> hdr_sampler_state_;
 };
 
 #endif  // D3D11_RENDERER_H_

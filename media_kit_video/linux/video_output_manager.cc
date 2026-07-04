@@ -47,14 +47,15 @@ void video_output_manager_create(VideoOutputManager* self,
                                  VideoOutputConfiguration configuration,
                                  TextureUpdateCallback texture_update_callback,
                                  gpointer texture_update_callback_context) {
-  if (!g_hash_table_contains(self->video_outputs, GINT_TO_POINTER(handle))) {
-    g_autoptr(VideoOutput) video_output = video_output_new(
-        self->texture_registrar, self->view, handle, configuration);
-    video_output_set_texture_update_callback(
-        video_output, texture_update_callback, texture_update_callback_context);
-    g_hash_table_insert(self->video_outputs, GINT_TO_POINTER(handle),
-                        g_object_ref(video_output));
+  if (g_hash_table_contains(self->video_outputs, GINT_TO_POINTER(handle))) {
+    g_hash_table_remove(self->video_outputs, GINT_TO_POINTER(handle));
   }
+  g_autoptr(VideoOutput) video_output = video_output_new(
+      self->texture_registrar, self->view, handle, configuration);
+  video_output_set_texture_update_callback(
+      video_output, texture_update_callback, texture_update_callback_context);
+  g_hash_table_insert(self->video_outputs, GINT_TO_POINTER(handle),
+                      g_object_ref(video_output));
 }
 
 void video_output_manager_set_size(VideoOutputManager* self,
