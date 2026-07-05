@@ -803,31 +803,39 @@ class _MaterialDesktopVideoControlsState
                                         ),
                                       ),
                                       if (_theme(context).displaySeekBar)
-                                        Transform.translate(
-                                          offset: _theme(context)
-                                                  .bottomButtonBar
-                                                  .isNotEmpty
-                                              ? const Offset(0.0, 16.0)
-                                              : Offset.zero,
-                                          child: MaterialDesktopSeekBar(
-                                            onSeekStart: () {
-                                              _timer?.cancel();
-                                            },
-                                            onSeekEnd: () {
-                                              _timer = Timer(
-                                                _theme(context)
-                                                    .controlsHoverDuration,
-                                                () {
-                                                  if (mounted && !_theme(context).lockControlsVisible) {
-                                                    setState(() {
-                                                      visible = false;
-                                                    });
-                                                    unshiftSubtitle();
-                                                  }
+                                        Builder(
+                                          builder: (context) {
+                                            final controlsTheme =
+                                                _theme(context);
+                                            return Transform.translate(
+                                              offset: controlsTheme
+                                                      .bottomButtonBar
+                                                      .isNotEmpty
+                                                  ? const Offset(0.0, 16.0)
+                                                  : Offset.zero,
+                                              child: MaterialDesktopSeekBar(
+                                                onSeekStart: () {
+                                                  _timer?.cancel();
                                                 },
-                                              );
-                                            },
-                                          ),
+                                                onSeekEnd: () {
+                                                  _timer = Timer(
+                                                    controlsTheme
+                                                        .controlsHoverDuration,
+                                                    () {
+                                                      if (mounted &&
+                                                          !controlsTheme
+                                                              .lockControlsVisible) {
+                                                        setState(() {
+                                                          visible = false;
+                                                        });
+                                                        unshiftSubtitle();
+                                                      }
+                                                    },
+                                                  );
+                                                },
+                                              ),
+                                            );
+                                          },
                                         ),
                                       if (_theme(context)
                                           .bottomButtonBar
@@ -950,10 +958,11 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   bool click = false;
   double slider = 0.0;
 
-  late bool playing = controller(context).player.state.playing;
-  late Duration position = controller(context).player.state.position;
-  late Duration duration = controller(context).player.state.duration;
-  late Duration buffer = controller(context).player.state.buffer;
+  late VideoController _controller;
+  late bool playing;
+  late Duration position;
+  late Duration duration;
+  late Duration buffer;
 
   List<VideoChapter> chapters = [];
   bool chaptersExternallyManaged = false;
@@ -970,12 +979,31 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    chaptersExternallyManaged = _theme(context).videoChapters != null;
+    final nextController = controller(context);
+    final controllerChanged =
+        subscriptions.isEmpty || !identical(_controller, nextController);
+    if (controllerChanged) {
+      for (final subscription in subscriptions) {
+        subscription.cancel();
+      }
+      subscriptions.clear();
+      _controller = nextController;
+    }
+
+    final controlsTheme = _theme(context);
+    chaptersExternallyManaged = controlsTheme.videoChapters != null;
     if (chaptersExternallyManaged && chapters.isNotEmpty) {
+      chapters = [];
+    } else if (controllerChanged && chapters.isNotEmpty) {
       chapters = [];
     }
 
-    if (subscriptions.isEmpty) {
+    if (controllerChanged) {
+      playing = _controller.player.state.playing;
+      position = _controller.player.state.position;
+      duration = _controller.player.state.duration;
+      buffer = _controller.player.state.buffer;
+
       if (!chaptersExternallyManaged &&
           duration > Duration.zero &&
           chapters.isEmpty) {
@@ -983,22 +1011,22 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       }
       subscriptions.addAll(
         [
-          controller(context).player.stream.playing.listen((event) {
+          _controller.player.stream.playing.listen((event) {
             setState(() {
               playing = event;
             });
           }),
-          controller(context).player.stream.completed.listen((event) {
+          _controller.player.stream.completed.listen((event) {
             setState(() {
               position = Duration.zero;
             });
           }),
-          controller(context).player.stream.position.listen((event) {
+          _controller.player.stream.position.listen((event) {
             setState(() {
               if (!click) position = event;
             });
           }),
-          controller(context).player.stream.duration.listen((event) {
+          _controller.player.stream.duration.listen((event) {
             setState(() {
               duration = event;
             });
@@ -1016,7 +1044,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
               _fetchChapters();
             }
           }),
-          controller(context).player.stream.buffer.listen((event) {
+          _controller.player.stream.buffer.listen((event) {
             setState(() {
               buffer = event;
             });
@@ -1038,7 +1066,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
     try {
       if (chaptersExternallyManaged) return;
 
-      final dynamic platform = controller(context).player.platform;
+      final dynamic platform = _controller.player.platform;
       final countStr = await platform.getProperty('chapter-list/count');
       if (countStr != null && countStr.isNotEmpty) {
         final count = int.tryParse(countStr) ?? 0;
@@ -1071,7 +1099,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       hover = true;
       slider = percent.clamp(0.0, 1.0);
     });
-    controller(context).player.seek(duration * slider);
+    _controller.player.seek(duration * slider);
   }
 
   void onPointerDown() {
@@ -1088,7 +1116,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       click = false;
       position = duration * slider;
     });
-    controller(context).player.seek(duration * slider);
+    _controller.player.seek(duration * slider);
   }
 
   void onHover(PointerHoverEvent e, BoxConstraints constraints) {
