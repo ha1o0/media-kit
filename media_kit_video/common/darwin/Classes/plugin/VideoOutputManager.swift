@@ -43,6 +43,19 @@ public class VideoOutputManager: NSObject {
     )
   }
 
+  public func setPostProcessingEffect(
+    handle: Int64,
+    effect: String,
+    enabled: Bool
+  ) -> Bool {
+    let videoOutput = self.videoOutputs[handle]
+    if videoOutput == nil {
+      return false
+    }
+
+    return videoOutput!.setPostProcessingEffect(effect, enabled: enabled)
+  }
+
   public func destroy(
     handle: Int64
   ) {

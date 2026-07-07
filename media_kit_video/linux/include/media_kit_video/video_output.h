@@ -91,6 +91,12 @@ void video_output_set_texture_update_callback(
  */
 void video_output_set_size(VideoOutput* self, gint64 width, gint64 height);
 
+gboolean video_output_set_post_processing_effect(VideoOutput* self,
+                                                 const gchar* effect,
+                                                 gboolean enabled);
+
+gboolean video_output_get_anime4k_enabled(VideoOutput* self);
+
 mpv_render_context* video_output_get_render_context(VideoOutput* self);
 
 GdkGLContext* video_output_get_gdk_gl_context(VideoOutput* self);

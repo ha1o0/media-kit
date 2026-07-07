@@ -78,6 +78,21 @@ public class VideoOutput: NSObject {
     }
   }
 
+  public func setPostProcessingEffect(_ effect: String, enabled: Bool) -> Bool {
+    let semaphore = DispatchSemaphore(value: 0)
+    var applied = false
+    worker.enqueue {
+      if self.disposed {
+        applied = false
+      } else {
+        applied = self.texture?.setPostProcessingEffect(effect, enabled: enabled) ?? false
+      }
+      semaphore.signal()
+    }
+    semaphore.wait()
+    return applied
+  }
+
   private func _init() {
     let enableHardwareAcceleration =
       VideoOutput.isSimulator ? false : enableHardwareAcceleration

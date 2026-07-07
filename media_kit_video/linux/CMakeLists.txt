@@ -16,6 +16,7 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
   add_library(
     ${PLUGIN_NAME} SHARED
     "media_kit_video_plugin.cc"
+    "opengl_anime4k_processor.cc"
     "texture_gl.cc"
     "texture_sw.cc"
     "video_output_manager.cc"

@@ -33,6 +33,12 @@ public class SafeResizableTexture:
     }
   }
 
+  public func setPostProcessingEffect(_ effect: String, enabled: Bool) -> Bool {
+    return locked {
+      return child.setPostProcessingEffect(effect, enabled: enabled)
+    }
+  }
+
   public func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
     return child.copyPixelBuffer()
   }

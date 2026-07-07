@@ -64,6 +64,12 @@ void video_output_manager_set_size(VideoOutputManager* self,
                                    gint64 width,
                                    gint64 height);
 
+gboolean video_output_manager_set_post_processing_effect(
+    VideoOutputManager* self,
+    gint64 handle,
+    const gchar* effect,
+    gboolean enabled);
+
 /**
  * @brief Disposes |VideoOutput| instance for given |handle|.
  *

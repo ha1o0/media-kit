@@ -36,6 +36,7 @@ struct _VideoOutput {
   gpointer texture_update_callback_context;
   FlTextureRegistrar* texture_registrar;
   gboolean destroyed;
+  gboolean anime4k_enabled;
 };
 
 G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
@@ -118,6 +119,7 @@ static void video_output_init(VideoOutput* self) {
   self->texture_update_callback_context = NULL;
   self->texture_registrar = NULL;
   self->destroyed = FALSE;
+  self->anime4k_enabled = FALSE;
   g_mutex_init(&self->mutex);
 }
 
@@ -408,6 +410,25 @@ void video_output_set_size(VideoOutput* self, gint64 width, gint64 height) {
     self->width = CLAMP(width, 0, SW_RENDERING_MAX_WIDTH);
     self->height = CLAMP(height, 0, SW_RENDERING_MAX_HEIGHT);
   }
+}
+
+gboolean video_output_set_post_processing_effect(VideoOutput* self,
+                                                 const gchar* effect,
+                                                 gboolean enabled) {
+  if (g_strcmp0(effect, "anime4k.restore_cnn_s") != 0) {
+    return FALSE;
+  }
+
+  if (enabled && self->texture_gl == NULL) {
+    return FALSE;
+  }
+
+  self->anime4k_enabled = enabled;
+  return TRUE;
+}
+
+gboolean video_output_get_anime4k_enabled(VideoOutput* self) {
+  return self->anime4k_enabled;
 }
 
 mpv_render_context* video_output_get_render_context(VideoOutput* self) {

@@ -135,6 +135,30 @@ static void media_kit_video_plugin_handle_method_call(
                                   width_value, height_value);
     FlValue* result = fl_value_new_null();
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+  } else if (g_strcmp0(method, "VideoOutputManager.SetAnime4KEnabled") == 0) {
+    FlValue* arguments = fl_method_call_get_args(method_call);
+    FlValue* handle = fl_value_lookup_string(arguments, "handle");
+    FlValue* enabled = fl_value_lookup_string(arguments, "enabled");
+    gint64 handle_value =
+        g_ascii_strtoll(fl_value_get_string(handle), NULL, 10);
+    video_output_manager_set_post_processing_effect(
+        self->video_output_manager, handle_value, "anime4k.restore_cnn_s",
+        fl_value_get_bool(enabled));
+    FlValue* result = fl_value_new_null();
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+  } else if (g_strcmp0(method,
+                       "VideoOutputManager.SetPostProcessingEffect") == 0) {
+    FlValue* arguments = fl_method_call_get_args(method_call);
+    FlValue* handle = fl_value_lookup_string(arguments, "handle");
+    FlValue* effect = fl_value_lookup_string(arguments, "effect");
+    FlValue* enabled = fl_value_lookup_string(arguments, "enabled");
+    gint64 handle_value =
+        g_ascii_strtoll(fl_value_get_string(handle), NULL, 10);
+    gboolean applied = video_output_manager_set_post_processing_effect(
+        self->video_output_manager, handle_value, fl_value_get_string(effect),
+        fl_value_get_bool(enabled));
+    FlValue* result = fl_value_new_bool(applied);
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   } else if (g_strcmp0(method, "VideoOutputManager.Dispose") == 0) {
     FlValue* arguments = fl_method_call_get_args(method_call);
     FlValue* handle = fl_value_lookup_string(arguments, "handle");

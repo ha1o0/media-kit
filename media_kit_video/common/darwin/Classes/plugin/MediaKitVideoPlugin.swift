@@ -55,6 +55,10 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       handleCreateMethodCall(call.arguments, result)
     case "VideoOutputManager.SetSize":
       handleSetSizeMethodCall(call.arguments, result)
+    case "VideoOutputManager.SetAnime4KEnabled":
+      handleSetAnime4KEnabledMethodCall(call.arguments, result)
+    case "VideoOutputManager.SetPostProcessingEffect":
+      handleSetPostProcessingEffectMethodCall(call.arguments, result)
     case "VideoOutputManager.Dispose":
       handleDisposeMethodCall(call.arguments, result)
     case "Utils.EnterNativeFullscreen":
@@ -123,6 +127,47 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
     )
 
     result(nil)
+  }
+
+  private func handleSetAnime4KEnabledMethodCall(
+    _ arguments: Any?,
+    _ result: FlutterResult
+  ) {
+    let args = arguments as? [String: Any]
+    let handleStr = args?["handle"] as! String
+    let enabled = args?["enabled"] as! Bool
+    let handle: Int64? = Int64(handleStr)
+
+    assert(handle != nil, "handle must be an Int64")
+
+    _ = self.videoOutputManager.setPostProcessingEffect(
+      handle: handle!,
+      effect: "anime4k.restore_cnn_s",
+      enabled: enabled
+    )
+
+    result(nil)
+  }
+
+  private func handleSetPostProcessingEffectMethodCall(
+    _ arguments: Any?,
+    _ result: FlutterResult
+  ) {
+    let args = arguments as? [String: Any]
+    let handleStr = args?["handle"] as! String
+    let effect = args?["effect"] as! String
+    let enabled = args?["enabled"] as! Bool
+    let handle: Int64? = Int64(handleStr)
+
+    assert(handle != nil, "handle must be an Int64")
+
+    let applied = self.videoOutputManager.setPostProcessingEffect(
+      handle: handle!,
+      effect: effect,
+      enabled: enabled
+    )
+
+    result(applied)
   }
 
   private func handleDisposeMethodCall(

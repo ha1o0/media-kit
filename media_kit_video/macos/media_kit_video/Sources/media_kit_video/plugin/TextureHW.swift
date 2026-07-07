@@ -20,6 +20,8 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
     objects: [],
     skipCheckArgs: true
   )
+  private var anime4kEnabled: Bool = false
+  private var anime4kProcessor: OpenGLAnime4KProcessor?
 
   init(
     handle: OpaquePointer,
@@ -41,6 +43,9 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
   deinit {
     disposePixelBuffer()
     disposeMPV()
+    CGLSetCurrentContext(context)
+    anime4kProcessor = nil
+    CGLSetCurrentContext(nil)
     OpenGLHelpers.deleteTextureCache(textureCache)
     OpenGLHelpers.deletePixelFormat(pixelFormat)
 
@@ -162,6 +167,21 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
     createPixelBuffer(size)
   }
 
+  public func setPostProcessingEffect(_ effect: String, enabled: Bool) -> Bool {
+    if effect != "anime4k.restore_cnn_s" {
+      return false
+    }
+
+    anime4kEnabled = enabled
+    if !enabled {
+      CGLSetCurrentContext(context)
+      anime4kProcessor = nil
+      OpenGLHelpers.checkError("setPostProcessingEffect")
+      CGLSetCurrentContext(nil)
+    }
+    return true
+  }
+
   private func createPixelBuffer(_ size: CGSize) {
     disposePixelBuffer()
 
@@ -203,13 +223,28 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
       CGLSetCurrentContext(nil)
     }
 
-    glBindFramebuffer(GLenum(GL_FRAMEBUFFER), textureContext!.frameBuffer)
+    let outputFrameBuffer = textureContext!.frameBuffer
+    var renderFrameBuffer = outputFrameBuffer
+    var anime4kReady = false
+    if anime4kEnabled {
+      if anime4kProcessor == nil {
+        anime4kProcessor = OpenGLAnime4KProcessor()
+      }
+      if let anime4kProcessor = anime4kProcessor,
+        anime4kProcessor.ensureSize(size)
+      {
+        renderFrameBuffer = anime4kProcessor.inputFrameBuffer
+        anime4kReady = true
+      }
+    }
+
+    glBindFramebuffer(GLenum(GL_FRAMEBUFFER), renderFrameBuffer)
     defer {
       glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
     }
 
     var fbo = mpv_opengl_fbo(
-      fbo: Int32(textureContext!.frameBuffer),
+      fbo: Int32(renderFrameBuffer),
       w: Int32(size.width),
       h: Int32(size.height),
       internal_format: 0
@@ -221,6 +256,14 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
       mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
     ]
     mpv_render_context_render(renderContext, &params)
+
+    if anime4kReady,
+      let anime4kProcessor = anime4kProcessor,
+      !anime4kProcessor.process(outputFrameBuffer: outputFrameBuffer)
+    {
+      _ = anime4kProcessor.copyInput(to: outputFrameBuffer)
+      NSLog("TextureHW: Anime4K pass failed; copied original frame")
+    }
 
     glFlush()
 

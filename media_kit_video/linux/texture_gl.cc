@@ -11,6 +11,8 @@
 #include <epoxy/gl.h>
 #include <epoxy/egl.h>
 
+#include "include/media_kit_video/opengl_anime4k_processor.h"
+
 // EGLImage extension function pointers
 typedef EGLImageKHR (*PFNEGLCREATEIMAGEKHRPROC)(EGLDisplay dpy, EGLContext ctx, EGLenum target, EGLClientBuffer buffer, const EGLint *attrib_list);
 typedef EGLBoolean (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay dpy, EGLImageKHR image);
@@ -46,6 +48,7 @@ struct _TextureGL {
   guint32 current_width;
   guint32 current_height;
   VideoOutput* video_output;
+  OpenGLAnime4KProcessor* anime4k_processor;
 };
 
 G_DEFINE_TYPE(TextureGL, texture_gl, fl_texture_gl_get_type())
@@ -58,6 +61,7 @@ static void texture_gl_init(TextureGL* self) {
   self->current_width = 1;
   self->current_height = 1;
   self->video_output = NULL;
+  self->anime4k_processor = NULL;
 }
 
 static void texture_gl_dispose(GObject* object) {
@@ -91,6 +95,10 @@ static void texture_gl_dispose(GObject* object) {
     if (egl_context != EGL_NO_CONTEXT) {
       eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context);
 
+      if (self->anime4k_processor != NULL) {
+        opengl_anime4k_processor_free(self->anime4k_processor);
+        self->anime4k_processor = NULL;
+      }
       if (self->mpv_texture != 0) {
         glDeleteTextures(1, &self->mpv_texture);
         self->mpv_texture = 0;
@@ -234,11 +242,31 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
     // Switch to mpv's isolated context for rendering
     eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_context);
 
-    // Bind mpv's FBO
-    glBindFramebuffer(GL_FRAMEBUFFER, self->fbo);
+    gboolean anime4k_enabled = video_output_get_anime4k_enabled(video_output);
+    if (!anime4k_enabled && self->anime4k_processor != NULL) {
+      opengl_anime4k_processor_free(self->anime4k_processor);
+      self->anime4k_processor = NULL;
+    }
 
-    // Render mpv frame to mpv's texture
-    mpv_opengl_fbo fbo{(gint32)self->fbo, required_width, required_height, 0};
+    guint32 render_fbo = self->fbo;
+    gboolean anime4k_ready = FALSE;
+    if (anime4k_enabled) {
+      if (self->anime4k_processor == NULL) {
+        self->anime4k_processor = opengl_anime4k_processor_new();
+      }
+      anime4k_ready = opengl_anime4k_processor_ensure_size(
+          self->anime4k_processor, required_width, required_height);
+      if (anime4k_ready) {
+        render_fbo = opengl_anime4k_processor_get_input_fbo(
+            self->anime4k_processor);
+      }
+    }
+
+    // Bind mpv's target FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, render_fbo);
+
+    // Render mpv frame to either Flutter's texture or Anime4K's input texture.
+    mpv_opengl_fbo fbo{(gint32)render_fbo, required_width, required_height, 0};
     int flip_y = 0;
     mpv_render_param params[] = {
         {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
@@ -249,6 +277,15 @@ gboolean texture_gl_populate_texture(FlTextureGL* texture,
 
     // Unbind FBO
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (anime4k_ready &&
+        !opengl_anime4k_processor_process(self->anime4k_processor,
+                                          self->fbo)) {
+      opengl_anime4k_processor_copy_input_to_fbo(self->anime4k_processor,
+                                                 self->fbo);
+      g_printerr("media_kit: TextureGL: Anime4K pass failed; copied original "
+                 "frame.\n");
+    }
 
     // Flush to ensure rendering is complete
     glFlush();
