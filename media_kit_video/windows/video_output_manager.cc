@@ -38,6 +38,15 @@ void VideoOutputManager::SetSize(int64_t handle,
   }).detach();
 }
 
+void VideoOutputManager::SetAnime4KEnabled(int64_t handle, bool enabled) {
+  std::thread([=]() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (video_outputs_.find(handle) != video_outputs_.end()) {
+      video_outputs_[handle]->SetAnime4KEnabled(enabled);
+    }
+  }).detach();
+}
+
 void VideoOutputManager::Dispose(int64_t handle) {
   std::thread([=]() {
     std::lock_guard<std::mutex> lock(mutex_);

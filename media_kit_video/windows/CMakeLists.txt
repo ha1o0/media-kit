@@ -27,6 +27,7 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
   add_library(
     ${PLUGIN_NAME} SHARED
     "d3d11_renderer.cc"
+    "d3d11_anime4k_processor.cc"
     "mailbox_swap_chain.cc"
     "media_kit_video_plugin_c_api.cc"
     "media_kit_video_plugin.cc"
@@ -60,6 +61,7 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
     # Link to libmpv & D3D11.
     "${LIBMPV_SRC}/libmpv.dll.a"
     d3d11
+    d3dcompiler
     dxgi
   )
 else()

@@ -80,6 +80,8 @@ class VideoOutput {
 
   void SetSize(std::optional<int64_t> width, std::optional<int64_t> height);
 
+  void SetAnime4KEnabled(bool enabled);
+
  private:
   void NotifyRender();
 

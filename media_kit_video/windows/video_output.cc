@@ -279,6 +279,14 @@ void VideoOutput::SetSize(std::optional<int64_t> width,
   });
 }
 
+void VideoOutput::SetAnime4KEnabled(bool enabled) {
+  thread_pool_ref_->Post([&, enabled]() {
+    if (d3d11_renderer_ != nullptr) {
+      d3d11_renderer_->SetAnime4KEnabled(enabled);
+    }
+  });
+}
+
 void VideoOutput::CheckAndResize() {
   // Check if a new texture with different dimensions is needed.
   auto required_width = GetVideoWidth(), required_height = GetVideoHeight();

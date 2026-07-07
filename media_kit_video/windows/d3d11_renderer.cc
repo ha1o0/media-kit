@@ -30,15 +30,40 @@ D3D11Renderer::D3D11Renderer(int32_t width,
 }
 
 D3D11Renderer::~D3D11Renderer() {
+  anime4k_processor_.reset(nullptr);
   mailbox_swap_chain_.Reset();
   d3d_11_device_context_.Reset();
   d3d_11_device_.Reset();
+}
+
+ID3D11Texture2D* D3D11Renderer::render_target() {
+  anime4k_frame_pending_ = false;
+  if (!mailbox_swap_chain_) {
+    return nullptr;
+  }
+  if (!anime4k_enabled_) {
+    return mailbox_swap_chain_->RenderTarget();
+  }
+
+  if (!anime4k_processor_) {
+    anime4k_processor_ = std::make_unique<D3D11Anime4KProcessor>(
+        d3d_11_device_.Get(), d3d_11_device_context_.Get());
+  }
+  if (!anime4k_processor_->EnsureSize(width_, height_)) {
+    return mailbox_swap_chain_->RenderTarget();
+  }
+
+  anime4k_frame_pending_ = true;
+  return anime4k_processor_->input_texture();
 }
 
 void D3D11Renderer::SetSize(int32_t width, int32_t height) {
   if (width == width_ && height == height_) return;
   width_ = width;
   height_ = height;
+  if (anime4k_processor_) {
+    anime4k_processor_->EnsureSize(width_, height_);
+  }
   if (mailbox_swap_chain_) {
     const HRESULT hr = mailbox_swap_chain_->Resize(width_, height_);
     if (FAILED(hr)) {
@@ -48,8 +73,28 @@ void D3D11Renderer::SetSize(int32_t width, int32_t height) {
   }
 }
 
+void D3D11Renderer::SetAnime4KEnabled(bool enabled) {
+  anime4k_enabled_ = enabled;
+  anime4k_frame_pending_ = false;
+  if (!enabled && anime4k_processor_) {
+    anime4k_processor_->Reset();
+  }
+}
+
 bool D3D11Renderer::ProducerCommit() {
   if (mailbox_swap_chain_) {
+    if (anime4k_frame_pending_ && anime4k_processor_ &&
+        anime4k_processor_->input_texture()) {
+      ID3D11Texture2D* output = mailbox_swap_chain_->RenderTarget();
+      if (output && !anime4k_processor_->Process(output)) {
+        d3d_11_device_context_->CopyResource(
+            output, anime4k_processor_->input_texture());
+        std::cout << "media_kit: D3D11Renderer: Anime4K pass failed; "
+                     "submitting unprocessed frame."
+                  << std::endl;
+      }
+    }
+    anime4k_frame_pending_ = false;
     return mailbox_swap_chain_->ProducerCommit();
   }
   return false;

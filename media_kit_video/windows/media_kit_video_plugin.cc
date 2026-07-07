@@ -202,6 +202,33 @@ void MediaKitVideoPlugin::HandleMethodCall(
     }
     video_output_manager_->SetSize(handle_value, width_value, height_value);
     result->Success(flutter::EncodableValue(std::monostate{}));
+  } else if (method_call.method_name().compare(
+                 "VideoOutputManager.SetAnime4KEnabled") == 0) {
+    auto arguments = std::get<flutter::EncodableMap>(*method_call.arguments());
+    auto handle =
+        std::get<std::string>(arguments[flutter::EncodableValue("handle")]);
+    auto enabled =
+        std::get<bool>(arguments[flutter::EncodableValue("enabled")]);
+    auto handle_value = static_cast<int64_t>(std::stoll(handle.c_str()));
+    video_output_manager_->SetAnime4KEnabled(handle_value, enabled);
+    result->Success(flutter::EncodableValue(std::monostate{}));
+  } else if (method_call.method_name().compare(
+                 "VideoOutputManager.SetPostProcessingEffect") == 0) {
+    auto arguments = std::get<flutter::EncodableMap>(*method_call.arguments());
+    auto handle =
+        std::get<std::string>(arguments[flutter::EncodableValue("handle")]);
+    auto effect =
+        std::get<std::string>(arguments[flutter::EncodableValue("effect")]);
+    auto enabled =
+        std::get<bool>(arguments[flutter::EncodableValue("enabled")]);
+    auto handle_value = static_cast<int64_t>(std::stoll(handle.c_str()));
+
+    if (effect.compare("anime4k.restore_cnn_s") == 0) {
+      video_output_manager_->SetAnime4KEnabled(handle_value, enabled);
+      result->Success(flutter::EncodableValue(true));
+    } else {
+      result->Success(flutter::EncodableValue(false));
+    }
   } else if (method_call.method_name().compare("Utils.EnterNativeFullscreen") ==
              0) {
     auto window =

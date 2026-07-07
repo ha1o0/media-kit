@@ -39,6 +39,8 @@ class VideoOutputManager {
                std::optional<int64_t> width,
                std::optional<int64_t> height);
 
+  void SetAnime4KEnabled(int64_t handle, bool enabled);
+
   // Destroys the |VideoOutput| with given handle.
   void Dispose(int64_t handle);
 
