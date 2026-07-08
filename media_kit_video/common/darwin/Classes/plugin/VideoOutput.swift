@@ -79,18 +79,20 @@ public class VideoOutput: NSObject {
   }
 
   public func setPostProcessingEffect(_ effect: String, enabled: Bool) -> Bool {
-    let semaphore = DispatchSemaphore(value: 0)
-    var applied = false
-    worker.enqueue {
-      if self.disposed {
-        applied = false
-      } else {
-        applied = self.texture?.setPostProcessingEffect(effect, enabled: enabled) ?? false
-      }
-      semaphore.signal()
+    if disposed || texture == nil {
+      return false
     }
-    semaphore.wait()
-    return applied
+    if effect != "anime4k.restore_cnn_s" {
+      return false
+    }
+
+    worker.enqueue { [weak self] in
+      guard let that = self else {
+        return
+      }
+      _ = that.texture?.setPostProcessingEffect(effect, enabled: enabled)
+    }
+    return true
   }
 
   private func _init() {

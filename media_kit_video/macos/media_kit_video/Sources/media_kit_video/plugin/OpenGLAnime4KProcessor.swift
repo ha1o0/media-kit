@@ -27,7 +27,7 @@ public final class OpenGLAnime4KProcessor {
   private var restoreFrameBuffers: [GLuint] = [0, 0, 0]
   private var programs: [GLuint] = [0, 0, 0, 0]
   private var copyProgram: GLuint = 0
-  private var vertexArray: GLuint = 0
+  public var initFailed = false
   private var vertexBuffer: GLuint = 0
 
   deinit {
@@ -36,10 +36,15 @@ public final class OpenGLAnime4KProcessor {
   }
 
   public func ensureSize(_ size: CGSize) -> Bool {
+    if initFailed {
+      return false
+    }
+
     let requiredWidth = max(GLsizei(size.width), 1)
     let requiredHeight = max(GLsizei(size.height), 1)
 
     if !ensureShaders() {
+      initFailed = true
       return false
     }
 
@@ -60,6 +65,7 @@ public final class OpenGLAnime4KProcessor {
       format: GLenum(GL_RGBA),
       type: GLenum(GL_UNSIGNED_BYTE)
     ) else {
+      initFailed = true
       return false
     }
 
@@ -67,19 +73,32 @@ public final class OpenGLAnime4KProcessor {
     inputFrameBuffer = input.frameBuffer
 
     for index in 0..<restoreTextures.count {
-      guard let restore = createTextureAndFrameBuffer(
+      var restore = createTextureAndFrameBuffer(
         width: requiredWidth,
         height: requiredHeight,
         internalFormat: GLint(GL_RGBA16F),
         format: GLenum(GL_RGBA),
         type: GLenum(GL_HALF_FLOAT)
-      ) else {
+      )
+
+      if restore == nil {
+        restore = createTextureAndFrameBuffer(
+          width: requiredWidth,
+          height: requiredHeight,
+          internalFormat: GLint(GL_RGBA),
+          format: GLenum(GL_RGBA),
+          type: GLenum(GL_UNSIGNED_BYTE)
+        )
+      }
+
+      guard let restoreResult = restore else {
         NSLog("OpenGLAnime4KProcessor: restore framebuffer \(index) is incomplete")
         deleteFrameTextures()
+        initFailed = true
         return false
       }
-      restoreTextures[index] = restore.texture
-      restoreFrameBuffers[index] = restore.frameBuffer
+      restoreTextures[index] = restoreResult.texture
+      restoreFrameBuffers[index] = restoreResult.frameBuffer
     }
 
     width = requiredWidth
@@ -134,6 +153,9 @@ public final class OpenGLAnime4KProcessor {
   }
 
   private func ensureShaders() -> Bool {
+    if initFailed {
+      return false
+    }
     if copyProgram != 0 && programs.allSatisfy({ $0 != 0 }) {
       return true
     }
@@ -144,6 +166,7 @@ public final class OpenGLAnime4KProcessor {
         fragmentSource: Anime4KRestoreCNNShaders.restorePasses[index]
       )
       if program == 0 {
+        initFailed = true
         return false
       }
       programs[index] = program
@@ -154,11 +177,10 @@ public final class OpenGLAnime4KProcessor {
       fragmentSource: Anime4KRestoreCNNShaders.copyFragment
     )
     if copyProgram == 0 {
+      initFailed = true
       return false
     }
 
-    glGenVertexArrays(1, &vertexArray)
-    glBindVertexArray(vertexArray)
     glGenBuffers(1, &vertexBuffer)
     glBindBuffer(GLenum(GL_ARRAY_BUFFER), vertexBuffer)
     vertices.withUnsafeBytes { buffer in
@@ -169,26 +191,7 @@ public final class OpenGLAnime4KProcessor {
         GLenum(GL_STATIC_DRAW)
       )
     }
-    glEnableVertexAttribArray(0)
-    glEnableVertexAttribArray(1)
-    glVertexAttribPointer(
-      0,
-      2,
-      GLenum(GL_FLOAT),
-      GLboolean(GL_FALSE),
-      GLsizei(4 * MemoryLayout<GLfloat>.size),
-      UnsafeRawPointer(bitPattern: 0)
-    )
-    glVertexAttribPointer(
-      1,
-      2,
-      GLenum(GL_FLOAT),
-      GLboolean(GL_FALSE),
-      GLsizei(4 * MemoryLayout<GLfloat>.size),
-      UnsafeRawPointer(bitPattern: 2 * MemoryLayout<GLfloat>.size)
-    )
     glBindBuffer(GLenum(GL_ARRAY_BUFFER), 0)
-    glBindVertexArray(0)
     return true
   }
 
@@ -252,6 +255,11 @@ public final class OpenGLAnime4KProcessor {
       return false
     }
 
+    var initialError = glGetError()
+    while initialError != GL_NO_ERROR {
+      initialError = glGetError()
+    }
+
     var oldProgram: GLint = 0
     var oldArrayBuffer: GLint = 0
     var oldVertexArray: GLint = 0
@@ -277,7 +285,30 @@ public final class OpenGLAnime4KProcessor {
     glBindFramebuffer(GLenum(GL_FRAMEBUFFER), outputFrameBuffer)
     glViewport(0, 0, width, height)
     glUseProgram(program)
-    glBindVertexArray(vertexArray)
+
+    var localVAO: GLuint = 0
+    glGenVertexArrays(1, &localVAO)
+    glBindVertexArray(localVAO)
+
+    glBindBuffer(GLenum(GL_ARRAY_BUFFER), vertexBuffer)
+    glEnableVertexAttribArray(0)
+    glEnableVertexAttribArray(1)
+    glVertexAttribPointer(
+      0,
+      2,
+      GLenum(GL_FLOAT),
+      GLboolean(GL_FALSE),
+      GLsizei(4 * MemoryLayout<GLfloat>.size),
+      UnsafeRawPointer(bitPattern: 0)
+    )
+    glVertexAttribPointer(
+      1,
+      2,
+      GLenum(GL_FLOAT),
+      GLboolean(GL_FALSE),
+      GLsizei(4 * MemoryLayout<GLfloat>.size),
+      UnsafeRawPointer(bitPattern: 2 * MemoryLayout<GLfloat>.size)
+    )
 
     let texSizeLocation = glGetUniformLocation(program, "tex_size")
     if texSizeLocation >= 0 {
@@ -302,14 +333,20 @@ public final class OpenGLAnime4KProcessor {
 
     glDrawArrays(GLenum(GL_TRIANGLE_STRIP), 0, 4)
 
+    glDisableVertexAttribArray(0)
+    glDisableVertexAttribArray(1)
+    glBindBuffer(GLenum(GL_ARRAY_BUFFER), 0)
+    glBindVertexArray(0)
+    glDeleteVertexArrays(1, &localVAO)
+
     glActiveTexture(GLenum(GL_TEXTURE1))
     glBindTexture(GLenum(GL_TEXTURE_2D), 0)
     glActiveTexture(GLenum(GL_TEXTURE0))
     glBindTexture(GLenum(GL_TEXTURE_2D), 0)
-    glBindVertexArray(GLuint(oldVertexArray))
     glUseProgram(GLuint(oldProgram))
     glBindBuffer(GLenum(GL_ARRAY_BUFFER), GLuint(oldArrayBuffer))
     glBindFramebuffer(GLenum(GL_FRAMEBUFFER), GLuint(oldFrameBuffer))
+    glBindVertexArray(GLuint(oldVertexArray))
     glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3])
     if blendEnabled == GL_TRUE {
       glEnable(GLenum(GL_BLEND))
@@ -322,7 +359,12 @@ public final class OpenGLAnime4KProcessor {
     }
     glActiveTexture(GLenum(oldActiveTexture))
 
-    return glGetError() == GL_NO_ERROR
+    let err = glGetError()
+    if err != GL_NO_ERROR {
+      NSLog("OpenGLAnime4KProcessor: renderPass failed with OpenGL error: 0x\(String(err, radix: 16))")
+      return false
+    }
+    return true
   }
 
   private func linkProgram(vertexSource: String, fragmentSource: String) -> GLuint {
@@ -362,8 +404,8 @@ public final class OpenGLAnime4KProcessor {
     source.withCString { pointer in
       var sourcePointer: UnsafePointer<GLchar>? = pointer
       glShaderSource(shader, 1, &sourcePointer, nil)
+      glCompileShader(shader)
     }
-    glCompileShader(shader)
 
     var compiled: GLint = 0
     glGetShaderiv(shader, GLenum(GL_COMPILE_STATUS), &compiled)
@@ -381,7 +423,7 @@ public final class OpenGLAnime4KProcessor {
     glGetShaderiv(shader, GLenum(GL_INFO_LOG_LENGTH), &logLength)
     var log = [GLchar](repeating: 0, count: max(Int(logLength), 1))
     log.withUnsafeMutableBufferPointer { buffer in
-      glGetShaderInfoLog(shader, GLsizei(log.count), nil, buffer.baseAddress)
+      glGetShaderInfoLog(shader, GLsizei(buffer.count), nil, buffer.baseAddress)
     }
     let message = log.withUnsafeBufferPointer { buffer in
       String(cString: buffer.baseAddress!)
@@ -394,7 +436,7 @@ public final class OpenGLAnime4KProcessor {
     glGetProgramiv(program, GLenum(GL_INFO_LOG_LENGTH), &logLength)
     var log = [GLchar](repeating: 0, count: max(Int(logLength), 1))
     log.withUnsafeMutableBufferPointer { buffer in
-      glGetProgramInfoLog(program, GLsizei(log.count), nil, buffer.baseAddress)
+      glGetProgramInfoLog(program, GLsizei(buffer.count), nil, buffer.baseAddress)
     }
     let message = log.withUnsafeBufferPointer { buffer in
       String(cString: buffer.baseAddress!)
@@ -441,10 +483,6 @@ public final class OpenGLAnime4KProcessor {
     if vertexBuffer != 0 {
       glDeleteBuffers(1, &vertexBuffer)
       vertexBuffer = 0
-    }
-    if vertexArray != 0 {
-      glDeleteVertexArrays(1, &vertexArray)
-      vertexArray = 0
     }
   }
 }

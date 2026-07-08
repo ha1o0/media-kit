@@ -173,7 +173,9 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
     }
 
     anime4kEnabled = enabled
-    if !enabled {
+    if enabled {
+      anime4kProcessor?.initFailed = false
+    } else {
       CGLSetCurrentContext(context)
       anime4kProcessor = nil
       OpenGLHelpers.checkError("setPostProcessingEffect")
@@ -231,6 +233,7 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
         anime4kProcessor = OpenGLAnime4KProcessor()
       }
       if let anime4kProcessor = anime4kProcessor,
+        !anime4kProcessor.initFailed,
         anime4kProcessor.ensureSize(size)
       {
         renderFrameBuffer = anime4kProcessor.inputFrameBuffer
@@ -258,11 +261,13 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
     mpv_render_context_render(renderContext, &params)
 
     if anime4kReady,
-      let anime4kProcessor = anime4kProcessor,
-      !anime4kProcessor.process(outputFrameBuffer: outputFrameBuffer)
+      let anime4kProcessor = anime4kProcessor
     {
-      _ = anime4kProcessor.copyInput(to: outputFrameBuffer)
-      NSLog("TextureHW: Anime4K pass failed; copied original frame")
+      if !anime4kProcessor.process(outputFrameBuffer: outputFrameBuffer) {
+        _ = anime4kProcessor.copyInput(to: outputFrameBuffer)
+        NSLog("TextureHW: Anime4K pass failed; copied original frame")
+        anime4kProcessor.initFailed = true
+      }
     }
 
     glFlush()
