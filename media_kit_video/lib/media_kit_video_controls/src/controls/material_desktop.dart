@@ -415,6 +415,7 @@ class _MaterialDesktopVideoControlsState
   late bool visible;
 
   Timer? _timer;
+  DateTime? _lastInteractionAt;
 
   late /* private */ var playlist = controller(context).player.state.playlist;
   late bool buffering = controller(context).player.state.buffering;
@@ -464,23 +465,15 @@ class _MaterialDesktopVideoControlsState
       );
 
       if (_theme(context).visibleOnMount) {
-        _timer = Timer(
-          _theme(context).controlsHoverDuration,
-          () {
-            if (mounted && !_theme(context).lockControlsVisible) {
-              setState(() {
-                visible = false;
-              });
-              unshiftSubtitle();
-            }
-          },
-        );
+        _lastInteractionAt = DateTime.now();
+        _scheduleAutoHide();
       }
     }
   }
 
   @override
   void dispose() {
+    _timer?.cancel();
     for (final subscription in subscriptions) {
       subscription.cancel();
     }
@@ -510,37 +503,49 @@ class _MaterialDesktopVideoControlsState
   }
 
   void onHover() {
-    setState(() {
-      mount = true;
-      visible = true;
-    });
+    if (!mount || !visible) {
+      setState(() {
+        mount = true;
+        visible = true;
+      });
+    }
     shiftSubtitle();
-    _timer?.cancel();
-    _timer = Timer(_theme(context).controlsHoverDuration, () {
-      if (mounted && !_theme(context).lockControlsVisible) {
-        setState(() {
-          visible = false;
-        });
-        unshiftSubtitle();
-      }
-    });
+    _lastInteractionAt = DateTime.now();
+    _scheduleAutoHide();
   }
 
   void onEnter() {
-    setState(() {
-      mount = true;
-      visible = true;
-    });
-    shiftSubtitle();
-    _timer?.cancel();
-    _timer = Timer(_theme(context).controlsHoverDuration, () {
-      if (mounted && !_theme(context).lockControlsVisible) {
-        setState(() {
-          visible = false;
-        });
-        unshiftSubtitle();
+    onHover();
+  }
+
+  void _scheduleAutoHide([Duration? delay]) {
+    if (_timer?.isActive ?? false) return;
+    _timer = Timer(
+      delay ?? _theme(context).controlsHoverDuration,
+      _handleAutoHideTimer,
+    );
+  }
+
+  void _handleAutoHideTimer() {
+    _timer = null;
+    if (!mounted || _theme(context).lockControlsVisible) return;
+
+    final lastInteractionAt = _lastInteractionAt;
+    if (lastInteractionAt != null) {
+      final hoverDuration = _theme(context).controlsHoverDuration;
+      final elapsed = DateTime.now().difference(lastInteractionAt);
+      if (elapsed < hoverDuration) {
+        _scheduleAutoHide(hoverDuration - elapsed);
+        return;
       }
-    });
+    }
+
+    if (visible) {
+      setState(() {
+        visible = false;
+      });
+      unshiftSubtitle();
+    }
   }
 
   void onExit() {
@@ -550,6 +555,8 @@ class _MaterialDesktopVideoControlsState
     });
     unshiftSubtitle();
     _timer?.cancel();
+    _timer = null;
+    _lastInteractionAt = null;
   }
 
   @override
@@ -1855,4 +1862,3 @@ class _DanmakuHeatmapPainter extends CustomPainter {
     return false;
   }
 }
-
