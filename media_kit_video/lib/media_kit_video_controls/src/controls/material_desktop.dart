@@ -823,22 +823,12 @@ class _MaterialDesktopVideoControlsState
                                               child: MaterialDesktopSeekBar(
                                                 onSeekStart: () {
                                                   _timer?.cancel();
+                                                  _timer = null;
                                                 },
                                                 onSeekEnd: () {
-                                                  _timer = Timer(
-                                                    controlsTheme
-                                                        .controlsHoverDuration,
-                                                    () {
-                                                      if (mounted &&
-                                                          !controlsTheme
-                                                              .lockControlsVisible) {
-                                                        setState(() {
-                                                          visible = false;
-                                                        });
-                                                        unshiftSubtitle();
-                                                      }
-                                                    },
-                                                  );
+                                                  _lastInteractionAt =
+                                                      DateTime.now();
+                                                  _scheduleAutoHide();
                                                 },
                                               ),
                                             );
