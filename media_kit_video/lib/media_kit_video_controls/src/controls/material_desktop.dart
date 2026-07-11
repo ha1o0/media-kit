@@ -503,6 +503,7 @@ class _MaterialDesktopVideoControlsState
   }
 
   void onHover() {
+    if (!mounted) return;
     if (!mount || !visible) {
       setState(() {
         mount = true;
@@ -519,6 +520,7 @@ class _MaterialDesktopVideoControlsState
   }
 
   void _scheduleAutoHide([Duration? delay]) {
+    if (!mounted) return;
     if (_timer?.isActive ?? false) return;
     _timer = Timer(
       delay ?? _theme(context).controlsHoverDuration,
@@ -549,6 +551,7 @@ class _MaterialDesktopVideoControlsState
   }
 
   void onExit() {
+    if (!mounted) return;
     if (_theme(context).lockControlsVisible) return;
     setState(() {
       visible = false;
@@ -822,10 +825,12 @@ class _MaterialDesktopVideoControlsState
                                                   : Offset.zero,
                                               child: MaterialDesktopSeekBar(
                                                 onSeekStart: () {
+                                                  if (!mounted) return;
                                                   _timer?.cancel();
                                                   _timer = null;
                                                 },
                                                 onSeekEnd: () {
+                                                  if (!mounted) return;
                                                   _lastInteractionAt =
                                                       DateTime.now();
                                                   _scheduleAutoHide();
@@ -1091,6 +1096,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   }
 
   void onPointerMove(PointerMoveEvent e, BoxConstraints constraints) {
+    if (!mounted) return;
     final percent = e.localPosition.dx / constraints.maxWidth;
     setState(() {
       hover = true;
@@ -1100,6 +1106,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   }
 
   void onPointerDown() {
+    if (!mounted) return;
     widget.onSeekStart?.call();
     setState(() {
       click = true;
@@ -1107,6 +1114,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   }
 
   void onPointerUp() {
+    if (!mounted) return;
     widget.onSeekEnd?.call();
     setState(() {
       // Explicitly set the position to prevent the slider from jumping.
@@ -1117,6 +1125,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   }
 
   void onHover(PointerHoverEvent e, BoxConstraints constraints) {
+    if (!mounted) return;
     final percent = e.localPosition.dx / constraints.maxWidth;
     setState(() {
       hover = true;
@@ -1125,6 +1134,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   }
 
   void onEnter(PointerEnterEvent e, BoxConstraints constraints) {
+    if (!mounted) return;
     final percent = e.localPosition.dx / constraints.maxWidth;
     setState(() {
       hover = true;
@@ -1133,6 +1143,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   }
 
   void onExit(PointerExitEvent e, BoxConstraints constraints) {
+    if (!mounted) return;
     setState(() {
       hover = false;
       slider = 0.0;
@@ -1288,7 +1299,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
     );
   }
 }
-
+      
 // BUTTON: PLAY/PAUSE
 
 /// A material design play/pause button.
@@ -1820,7 +1831,7 @@ class _DanmakuHeatmapPainter extends CustomPainter {
       final x = i * stepX;
       // heatmap[i] 范围是 0.0 ~ 1.0。在此将最大高度限制在给定的 height 内
       final y = size.height - (heatmap[i] * size.height);
-      
+
       if (i == 0) {
         path.lineTo(x, y);
       } else {
