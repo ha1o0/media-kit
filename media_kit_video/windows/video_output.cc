@@ -186,11 +186,35 @@ VideoOutput::~VideoOutput() {
 }
 
 void VideoOutput::NotifyRender() {
-  if (destroyed_) {
+  if (destroyed_.load(std::memory_order_acquire)) {
     return;
   }
-  thread_pool_ref_->Post(std::bind(&VideoOutput::CheckAndResize, this));
-  thread_pool_ref_->Post(std::bind(&VideoOutput::Render, this));
+
+  render_requested_.store(true, std::memory_order_release);
+  if (render_task_pending_.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+
+  try {
+    thread_pool_ref_->Post([this]() {
+      render_requested_.store(false, std::memory_order_release);
+      if (!destroyed_.load(std::memory_order_acquire)) {
+        // Resize and render on the same worker task. This keeps the render
+        // state ordered while preventing a 4K60 stream from building an
+        // unbounded queue of stale frame jobs.
+        CheckAndResize();
+        Render();
+      }
+
+      render_task_pending_.store(false, std::memory_order_release);
+      if (render_requested_.exchange(false, std::memory_order_acq_rel) &&
+          !destroyed_.load(std::memory_order_acquire)) {
+        NotifyRender();
+      }
+    });
+  } catch (...) {
+    render_task_pending_.store(false, std::memory_order_release);
+  }
 }
 
 void VideoOutput::Render() {

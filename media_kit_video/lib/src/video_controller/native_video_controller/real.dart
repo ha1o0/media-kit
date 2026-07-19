@@ -98,12 +98,17 @@ class NativeVideoController extends PlatformVideoController {
         videoParamsWidth = width;
         videoParamsHeight = height;
 
+        // Preserve an explicitly requested output size. The video parameters
+        // describe the decoded source and may change between playlist items,
+        // but they must not silently overwrite a viewport-sized texture.
+        final outputWidth = this.width ?? width;
+        final outputHeight = this.height ?? height;
         await _channel.invokeMethod(
           'VideoOutputManager.SetSize',
           {
             'handle': handle.toString(),
-            'width': width.toString(),
-            'height': height.toString(),
+            'width': outputWidth.toString(),
+            'height': outputHeight.toString(),
           },
         );
       }),

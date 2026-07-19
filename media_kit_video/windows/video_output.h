@@ -9,6 +9,7 @@
 #ifndef VIDEO_OUTPUT_H_
 #define VIDEO_OUTPUT_H_
 
+#include <atomic>
 #include <optional>
 #include <string>
 
@@ -107,7 +108,9 @@ class VideoOutput {
   // For preventing any asynchronous operations (primarily texture objects
   // deletion after unregister in |Resize|) access this object after
   // destruction.
-  bool destroyed_ = false;
+  std::atomic<bool> destroyed_{false};
+  std::atomic<bool> render_task_pending_{false};
+  std::atomic<bool> render_requested_{false};
 
   std::mutex textures_mutex_ = std::mutex();
 

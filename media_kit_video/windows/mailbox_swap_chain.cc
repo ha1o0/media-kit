@@ -129,31 +129,41 @@ ID3D11Texture2D* MailboxSwapChain::RenderTarget() {
 }
 
 bool MailboxSwapChain::ProducerCommit() {
-  std::lock_guard<std::mutex> lock(slots_mutex_);
+  int submitted_slot = -1;
+  {
+    std::lock_guard<std::mutex> lock(slots_mutex_);
 
-  const int submitted_slot = write_slot_;
-  if (submitted_slot < 0) {
-    return false;
-  }
+    submitted_slot = write_slot_;
+    if (submitted_slot < 0) {
+      return false;
+    }
 
-  auto& slot = slots_[submitted_slot];
-  if (!slot.fence) return false;
+    auto& slot = slots_[submitted_slot];
+    if (!slot.fence) return false;
 
-  HRESULT hr = context4_->Signal(slot.fence.Get(), ++slot.fence_value);
-  if (FAILED(hr)) {
+    const HRESULT signal_hr =
+        context4_->Signal(slot.fence.Get(), ++slot.fence_value);
+    if (FAILED(signal_hr)) {
+      write_slot_ = -1;
+      return false;
+    }
+
+    context4_->Flush();
     write_slot_ = -1;
-    return false;
   }
 
-  context4_->Flush();
-  write_slot_ = -1;
-
-  hr = WaitForSlot(submitted_slot);
+  // Do not hold the mailbox mutex while waiting for the GPU. Flutter can keep
+  // consuming the most recently completed texture instead of blocking its
+  // render thread behind the producer.
+  const HRESULT hr = WaitForSlot(submitted_slot);
   if (FAILED(hr)) return false;
 
-  latest_completed_slot_.store(submitted_slot, std::memory_order_release);
-  has_completed_frame_.store(true, std::memory_order_release);
-  next_write_slot_ = (submitted_slot + 1) % 4;
+  {
+    std::lock_guard<std::mutex> lock(slots_mutex_);
+    latest_completed_slot_.store(submitted_slot, std::memory_order_release);
+    has_completed_frame_.store(true, std::memory_order_release);
+    next_write_slot_ = (submitted_slot + 1) % 4;
+  }
   return true;
 }
 
