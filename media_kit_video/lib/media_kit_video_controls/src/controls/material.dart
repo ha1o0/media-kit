@@ -282,6 +282,15 @@ class MaterialVideoControlsThemeData {
   /// [Color] of the seek bar thumb.
   final Color seekBarThumbColor;
 
+  /// Fractional positions to mark independently on the seek bar.
+  final List<double> seekBarMarkers;
+
+  /// [Color] of independent seek bar markers.
+  final Color seekBarMarkerColor;
+
+  /// Width of independent seek bar markers.
+  final double seekBarMarkerWidth;
+
   /// [Alignment] of seek bar inside the seek bar container.
   final Alignment seekBarAlignment;
 
@@ -352,6 +361,9 @@ class MaterialVideoControlsThemeData {
     this.seekBarBufferColor = const Color(0x3DFFFFFF),
     this.seekBarThumbSize = 12.8,
     this.seekBarThumbColor = const Color(0xFFFF0000),
+    this.seekBarMarkers = const [],
+    this.seekBarMarkerColor = const Color(0xFFFFFFFF),
+    this.seekBarMarkerWidth = 2.0,
     this.seekBarAlignment = Alignment.bottomCenter,
     this.shiftSubtitlesOnControlsVisibilityChange = false,
   });
@@ -405,6 +417,9 @@ class MaterialVideoControlsThemeData {
     Color? seekBarBufferColor,
     double? seekBarThumbSize,
     Color? seekBarThumbColor,
+    List<double>? seekBarMarkers,
+    Color? seekBarMarkerColor,
+    double? seekBarMarkerWidth,
     Alignment? seekBarAlignment,
     bool? shiftSubtitlesOnControlsVisibilityChange,
   }) {
@@ -477,6 +492,9 @@ class MaterialVideoControlsThemeData {
       seekBarBufferColor: seekBarBufferColor ?? this.seekBarBufferColor,
       seekBarThumbSize: seekBarThumbSize ?? this.seekBarThumbSize,
       seekBarThumbColor: seekBarThumbColor ?? this.seekBarThumbColor,
+      seekBarMarkers: seekBarMarkers ?? this.seekBarMarkers,
+      seekBarMarkerColor: seekBarMarkerColor ?? this.seekBarMarkerColor,
+      seekBarMarkerWidth: seekBarMarkerWidth ?? this.seekBarMarkerWidth,
       seekBarAlignment: seekBarAlignment ?? this.seekBarAlignment,
       shiftSubtitlesOnControlsVisibilityChange:
           shiftSubtitlesOnControlsVisibilityChange ??
@@ -1700,6 +1718,28 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
                                 : constraints.maxWidth * positionPercent,
                             color: _theme(context).seekBarPositionColor,
                           ),
+                          ..._theme(context).seekBarMarkers.where(
+                                (marker) => marker > 0.0 && marker < 1.0,
+                              ).map((marker) {
+                            final markerWidth =
+                                _theme(context).seekBarMarkerWidth;
+                            return Positioned(
+                              left: constraints.maxWidth * marker -
+                                  markerWidth / 2,
+                              top: -2.0,
+                              bottom: -2.0,
+                              child: IgnorePointer(
+                                child: Container(
+                                  width: markerWidth,
+                                  decoration: BoxDecoration(
+                                    color: _theme(context).seekBarMarkerColor,
+                                    borderRadius:
+                                        BorderRadius.circular(markerWidth / 2),
+                                  ),
+                                ),
+                              ),
+                            );
+                          }),
                         ],
                       ),
                     ),
