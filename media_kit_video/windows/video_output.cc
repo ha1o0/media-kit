@@ -311,6 +311,14 @@ void VideoOutput::SetAnime4KEnabled(bool enabled) {
   });
 }
 
+void VideoOutput::SetGPUThreadPriority(int priority) {
+  thread_pool_ref_->Post([this, priority]() {
+    if (d3d11_renderer_ != nullptr) {
+      d3d11_renderer_->SetGPUThreadPriority(priority);
+    }
+  });
+}
+
 void VideoOutput::CheckAndResize() {
   // Check if a new texture with different dimensions is needed.
   auto required_width = GetVideoWidth(), required_height = GetVideoHeight();

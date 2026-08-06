@@ -36,6 +36,7 @@ class D3D11Renderer {
 
   void SetSize(int32_t width, int32_t height);
   void SetAnime4KEnabled(bool enabled);
+  void SetGPUThreadPriority(int priority);
   bool ProducerCommit();
   HANDLE ConsumerAcquire();
   HANDLE ReadHandleSnapshot() const;

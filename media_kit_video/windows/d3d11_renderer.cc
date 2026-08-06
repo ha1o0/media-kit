@@ -13,6 +13,7 @@
 #include <stdexcept>
 
 #include "utils.h"
+#include "gpu_thread_priority.h"
 
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -152,10 +153,20 @@ bool D3D11Renderer::CreateD3D11Device(IDXGIAdapter* flutter_adapter) {
 
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
   if (SUCCEEDED(d3d_11_device_.As(&dxgi_device)) && dxgi_device) {
-    dxgi_device->SetGPUThreadPriority(5);
+    media_kit_video::ApplyGpuThreadPriority(dxgi_device.Get());
   }
 
   return true;
+}
+
+void D3D11Renderer::SetGPUThreadPriority(int priority) {
+  media_kit_video::g_gpu_thread_priority.store(
+      media_kit_video::NormalizeGpuThreadPriority(priority));
+  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+  if (d3d_11_device_ &&
+      SUCCEEDED(d3d_11_device_.As(&dxgi_device)) && dxgi_device) {
+    media_kit_video::ApplyGpuThreadPriority(dxgi_device.Get());
+  }
 }
 
 bool D3D11Renderer::CreateMailbox() {

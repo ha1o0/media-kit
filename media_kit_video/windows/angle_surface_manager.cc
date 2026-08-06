@@ -9,6 +9,8 @@
 
 #include <iostream>
 
+#include "gpu_thread_priority.h"
+
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3d11.lib")
 
@@ -182,7 +184,7 @@ bool ANGLESurfaceManager::CreateD3DTexture() {
   auto dxgi_device_success = d3d_11_device_->QueryInterface(
       __uuidof(IDXGIDevice), (void**)&dxgi_device);
   if (SUCCEEDED(dxgi_device_success) && dxgi_device != nullptr) {
-    dxgi_device->SetGPUThreadPriority(5);  // Must be in interval [-7, 7].
+    media_kit_video::ApplyGpuThreadPriority(dxgi_device.Get());
   }
 
   auto level = d3d_11_device_->GetFeatureLevel();

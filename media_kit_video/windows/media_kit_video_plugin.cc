@@ -7,6 +7,7 @@
 // LICENSE file.
 #include "media_kit_video_plugin.h"
 #include "utils.h"
+#include "gpu_thread_priority.h"
 
 #include <Windows.h>
 
@@ -211,6 +212,21 @@ void MediaKitVideoPlugin::HandleMethodCall(
         std::get<bool>(arguments[flutter::EncodableValue("enabled")]);
     auto handle_value = static_cast<int64_t>(std::stoll(handle.c_str()));
     video_output_manager_->SetAnime4KEnabled(handle_value, enabled);
+    result->Success(flutter::EncodableValue(std::monostate{}));
+  } else if (method_call.method_name().compare(
+                 "VideoOutputManager.SetGPUThreadPriority") == 0) {
+    const auto& arguments =
+        std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto value = arguments.find(flutter::EncodableValue("priority"));
+    int priority = media_kit_video::kDefaultGpuThreadPriority;
+    if (value != arguments.end()) {
+      if (const auto* int32_value = std::get_if<int32_t>(&value->second)) {
+        priority = *int32_value;
+      } else if (const auto* int64_value = std::get_if<int64_t>(&value->second)) {
+        priority = static_cast<int>(*int64_value);
+      }
+    }
+    video_output_manager_->SetGPUThreadPriority(priority);
     result->Success(flutter::EncodableValue(std::monostate{}));
   } else if (method_call.method_name().compare(
                  "VideoOutputManager.SetPostProcessingEffect") == 0) {

@@ -41,6 +41,10 @@ class VideoOutputManager {
 
   void SetAnime4KEnabled(int64_t handle, bool enabled);
 
+  // Updates the DXGI priority for all active hardware video outputs and the
+  // default used by renderers created afterwards.
+  void SetGPUThreadPriority(int priority);
+
   // Destroys the |VideoOutput| with given handle.
   void Dispose(int64_t handle);
 

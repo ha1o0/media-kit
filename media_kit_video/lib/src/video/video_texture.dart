@@ -400,6 +400,12 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   void refreshView() {}
 
+  Widget _maybeRepaintBoundary({required Widget child}) {
+    // This optimization targets the Windows high-refresh Texture path. Keep
+    // other platforms on their original layer tree until they are profiled.
+    return Platform.isWindows ? RepaintBoundary(child: child) : child;
+  }
+
   @override
   Widget build(BuildContext context) {
     return media_kit_video_controls.VideoStateInheritedWidget(
@@ -417,71 +423,79 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                ClipRect(
-                  child: FittedBox(
-                    fit: videoViewParameters.fit,
-                    alignment: videoViewParameters.alignment,
-                    child: ValueListenableBuilder<PlatformVideoController?>(
-                      valueListenable: widget.controller.notifier,
-                      builder: (context, notifier, _) => notifier == null
-                          ? const SizedBox.shrink()
-                          : ValueListenableBuilder<int?>(
-                              valueListenable: notifier.id,
-                              builder: (context, id, _) {
-                                return ValueListenableBuilder<Rect?>(
-                                  valueListenable: notifier.rect,
-                                  builder: (context, rect, _) {
-                                    if (id != null &&
-                                        rect != null &&
-                                        _visible) {
-                                      final view = SizedBox(
-                                        // Apply aspect ratio if provided.
-                                        width:
-                                            videoViewParameters.aspectRatio ==
-                                                    null
-                                                ? rect.width
-                                                : rect.height *
-                                                    videoViewParameters
-                                                        .aspectRatio!,
-                                        height: rect.height,
-                                        child: Stack(
-                                          children: [
-                                            const SizedBox(),
-                                            Positioned.fill(
-                                              child: Texture(
-                                                textureId: id,
-                                                filterQuality:
-                                                    videoViewParameters
-                                                        .filterQuality,
-                                              ),
-                                            ),
-                                            // Keep the |Texture| hidden before the first frame renders. In native implementation, if no default frame size is passed (through VideoController), a starting 1 pixel sized texture/surface is created to initialize the render context & check for H/W support.
-                                            // This is then resized based on the video dimensions & accordingly texture ID, texture, EGLDisplay, EGLSurface etc. (depending upon platform) are also changed. Just don't show that 1 pixel texture to the UI.
-                                            // NOTE: Unmounting |Texture| causes the |MarkTextureFrameAvailable| to not do anything on GNU/Linux.
-                                            if (rect.width <= 1.0 &&
-                                                rect.height <= 1.0)
+                // Isolate the video texture into its own compositing layer.
+                // Without this boundary, any setState in the controls or
+                // subtitle layers forces Flutter to re-rasterize the entire
+                // Stack — including the (potentially 4K) video texture — on
+                // every frame.  With separate RepaintBoundary layers, only
+                // the dirty layer is re-rasterized.
+                _maybeRepaintBoundary(
+                  child: ClipRect(
+                    child: FittedBox(
+                      fit: videoViewParameters.fit,
+                      alignment: videoViewParameters.alignment,
+                      child: ValueListenableBuilder<PlatformVideoController?>(
+                        valueListenable: widget.controller.notifier,
+                        builder: (context, notifier, _) => notifier == null
+                            ? const SizedBox.shrink()
+                            : ValueListenableBuilder<int?>(
+                                valueListenable: notifier.id,
+                                builder: (context, id, _) {
+                                  return ValueListenableBuilder<Rect?>(
+                                    valueListenable: notifier.rect,
+                                    builder: (context, rect, _) {
+                                      if (id != null &&
+                                          rect != null &&
+                                          _visible) {
+                                        final view = SizedBox(
+                                          // Apply aspect ratio if provided.
+                                          width:
+                                              videoViewParameters.aspectRatio ==
+                                                      null
+                                                  ? rect.width
+                                                  : rect.height *
+                                                      videoViewParameters
+                                                          .aspectRatio!,
+                                          height: rect.height,
+                                          child: Stack(
+                                            children: [
+                                              const SizedBox(),
                                               Positioned.fill(
-                                                child: Container(
-                                                  color:
-                                                      videoViewParameters.fill,
+                                                child: Texture(
+                                                  textureId: id,
+                                                  filterQuality:
+                                                      videoViewParameters
+                                                          .filterQuality,
                                                 ),
                                               ),
-                                          ],
-                                        ),
-                                      );
-                                      return _VisualTransform(
-                                        rotation:
-                                            videoViewParameters.visualRotation,
-                                        mirror:
-                                            videoViewParameters.visualMirror,
-                                        child: view,
-                                      );
-                                    }
-                                    return const SizedBox.shrink();
-                                  },
-                                );
-                              },
-                            ),
+                                              // Keep the |Texture| hidden before the first frame renders. In native implementation, if no default frame size is passed (through VideoController), a starting 1 pixel sized texture/surface is created to initialize the render context & check for H/W support.
+                                              // This is then resized based on the video dimensions & accordingly texture ID, texture, EGLDisplay, EGLSurface etc. (depending upon platform) are also changed. Just don't show that 1 pixel texture to the UI.
+                                              // NOTE: Unmounting |Texture| causes the |MarkTextureFrameAvailable| to not do anything on GNU/Linux.
+                                              if (rect.width <= 1.0 &&
+                                                  rect.height <= 1.0)
+                                                Positioned.fill(
+                                                  child: Container(
+                                                    color:
+                                                        videoViewParameters.fill,
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        );
+                                        return _VisualTransform(
+                                          rotation:
+                                              videoViewParameters.visualRotation,
+                                          mirror:
+                                              videoViewParameters.visualMirror,
+                                          child: view,
+                                        );
+                                      }
+                                      return const SizedBox.shrink();
+                                    },
+                                  );
+                                },
+                              ),
+                      ),
                     ),
                   ),
                 ),
@@ -489,16 +503,20 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                     !(widget.controller.player.platform?.configuration.libass ??
                         false))
                   Positioned.fill(
-                    child: SubtitleView(
-                      controller: widget.controller,
-                      key: _subtitleViewKey,
-                      configuration:
-                          videoViewParameters.subtitleViewConfiguration,
+                    child: _maybeRepaintBoundary(
+                      child: SubtitleView(
+                        controller: widget.controller,
+                        key: _subtitleViewKey,
+                        configuration:
+                            videoViewParameters.subtitleViewConfiguration,
+                      ),
                     ),
                   ),
                 if (videoViewParameters.controls != null)
                   Positioned.fill(
-                    child: videoViewParameters.controls!.call(this),
+                    child: _maybeRepaintBoundary(
+                      child: videoViewParameters.controls!.call(this),
+                    ),
                   ),
               ],
             ),

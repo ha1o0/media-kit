@@ -8,6 +8,8 @@
 
 #include "video_output_manager.h"
 
+#include "gpu_thread_priority.h"
+
 VideoOutputManager::VideoOutputManager(
     flutter::PluginRegistrarWindows* registrar)
     : registrar_(registrar) {}
@@ -43,6 +45,18 @@ void VideoOutputManager::SetAnime4KEnabled(int64_t handle, bool enabled) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (video_outputs_.find(handle) != video_outputs_.end()) {
       video_outputs_[handle]->SetAnime4KEnabled(enabled);
+    }
+  }).detach();
+}
+
+void VideoOutputManager::SetGPUThreadPriority(int priority) {
+  const auto normalized =
+      media_kit_video::NormalizeGpuThreadPriority(priority);
+  media_kit_video::g_gpu_thread_priority.store(normalized);
+  std::thread([this, normalized]() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& entry : video_outputs_) {
+      entry.second->SetGPUThreadPriority(normalized);
     }
   }).detach();
 }

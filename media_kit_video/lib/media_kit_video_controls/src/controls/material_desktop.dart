@@ -434,6 +434,7 @@ class _MaterialDesktopVideoControlsState
 
   Timer? _timer;
   DateTime? _lastInteractionAt;
+  bool _unmountScheduled = false;
 
   late /* private */ var playlist = controller(context).player.state.playlist;
   late bool buffering = controller(context).player.state.buffering;
@@ -520,16 +521,39 @@ class _MaterialDesktopVideoControlsState
     }
   }
 
+  // Throttle onHover when controls are already visible.  The MouseRegion
+  // covers the entire video area, so onHover fires on every pixel of mouse
+  // movement (180+ times/sec on a high-refresh display).  When controls are
+  // already showing the only purpose is to reset the auto-hide timer, which
+  // does not need per-pixel precision.
+  static const _hoverThrottleInterval = Duration(milliseconds: 200);
+  DateTime _lastHoverHandledAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   void onHover() {
     if (!mounted) return;
+    final now = DateTime.now();
+    // Keep the auto-hide deadline accurate for every pointer event. This is
+    // cheap bookkeeping and prevents continuous mouse movement from being
+    // mistaken for inactivity.
+    _lastInteractionAt = now;
+
     if (!mount || !visible) {
+      // Controls not yet visible - show them immediately.
       setState(() {
         mount = true;
         visible = true;
       });
+      shiftSubtitle();
+      _lastHoverHandledAt = now;
+      _scheduleAutoHide();
+      return;
     }
+    // Controls already visible - throttle the remaining bookkeeping.
+    if (now.difference(_lastHoverHandledAt) < _hoverThrottleInterval) {
+      return;
+    }
+    _lastHoverHandledAt = now;
     shiftSubtitle();
-    _lastInteractionAt = DateTime.now();
     _scheduleAutoHide();
   }
 
@@ -566,6 +590,18 @@ class _MaterialDesktopVideoControlsState
       });
       unshiftSubtitle();
     }
+  }
+
+  void _handleControlsTransitionEnd() {
+    if (visible || !mount || _unmountScheduled) return;
+    _unmountScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _unmountScheduled = false;
+      if (!mounted || visible || !mount) return;
+      setState(() {
+        mount = false;
+      });
+    });
   }
 
   void onExit() {
@@ -736,13 +772,7 @@ class _MaterialDesktopVideoControlsState
                           curve: Curves.easeInOut,
                           opacity: visible ? 1.0 : 0.0,
                           duration: _theme(context).controlsTransitionDuration,
-                          onEnd: () {
-                            if (!visible) {
-                              setState(() {
-                                mount = false;
-                              });
-                            }
-                          },
+                          onEnd: _handleControlsTransitionEnd,
                           child: Stack(
                             clipBehavior: Clip.none,
                             alignment: Alignment.bottomCenter,
@@ -974,6 +1004,11 @@ class MaterialDesktopSeekBar extends StatefulWidget {
 }
 
 class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
+  // Position updates can arrive once per decoded frame (and faster at >1x
+  // playback speed). Keep the control surface responsive by limiting the
+  // seek-bar UI to a stable refresh rate while retaining immediate seek input.
+  static const _positionUiUpdateInterval = Duration(milliseconds: 66);
+
   bool hover = false;
   bool click = false;
   double slider = 0.0;
@@ -988,6 +1023,9 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   bool chaptersExternallyManaged = false;
 
   final List<StreamSubscription> subscriptions = [];
+  Timer? _positionUpdateTimer;
+  Duration? _pendingPosition;
+  DateTime _lastPositionUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void setState(VoidCallback fn) {
@@ -1019,6 +1057,9 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
     }
 
     if (controllerChanged) {
+      _positionUpdateTimer?.cancel();
+      _positionUpdateTimer = null;
+      _pendingPosition = null;
       playing = _controller.player.state.playing;
       position = _controller.player.state.position;
       duration = _controller.player.state.duration;
@@ -1037,14 +1078,27 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
             });
           }),
           _controller.player.stream.completed.listen((event) {
+            _positionUpdateTimer?.cancel();
+            _positionUpdateTimer = null;
+            _pendingPosition = null;
             setState(() {
               position = Duration.zero;
             });
           }),
           _controller.player.stream.position.listen((event) {
-            setState(() {
-              if (!click) position = event;
-            });
+            if (click) return;
+            _pendingPosition = event;
+
+            final now = DateTime.now();
+            final elapsed = now.difference(_lastPositionUiUpdate);
+            if (elapsed >= _positionUiUpdateInterval) {
+              _flushPositionUpdate(now);
+            } else {
+              _positionUpdateTimer ??= Timer(
+                _positionUiUpdateInterval - elapsed,
+                _flushPositionUpdate,
+              );
+            }
           }),
           _controller.player.stream.duration.listen((event) {
             setState(() {
@@ -1076,6 +1130,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
 
   @override
   void dispose() {
+    _positionUpdateTimer?.cancel();
     for (final subscription in subscriptions) {
       subscription.cancel();
     }
@@ -1125,6 +1180,9 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
 
   void onPointerDown() {
     if (!mounted) return;
+    _positionUpdateTimer?.cancel();
+    _positionUpdateTimer = null;
+    _pendingPosition = null;
     widget.onSeekStart?.call();
     setState(() {
       click = true;
@@ -1140,6 +1198,17 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       position = duration * slider;
     });
     _controller.player.seek(duration * slider);
+  }
+
+  void _flushPositionUpdate([DateTime? timestamp]) {
+    _positionUpdateTimer?.cancel();
+    _positionUpdateTimer = null;
+    if (!mounted || click || _pendingPosition == null) return;
+
+    position = _pendingPosition!;
+    _pendingPosition = null;
+    _lastPositionUiUpdate = timestamp ?? DateTime.now();
+    setState(() {});
   }
 
   void onHover(PointerHoverEvent e, BoxConstraints constraints) {
@@ -1264,7 +1333,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                             if (percent <= 0.0 || percent >= 1.0) {
                               return const SizedBox.shrink();
                             }
-                            
+
                             // Check if this chapter is hovered
                             final bool isHovered = hover && (slider - percent).abs() * constraints.maxWidth < 8.0;
 
@@ -1339,7 +1408,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
     );
   }
 }
-      
+
 // BUTTON: PLAY/PAUSE
 
 /// A material design play/pause button.
@@ -1771,10 +1840,15 @@ class MaterialDesktopPositionIndicator extends StatefulWidget {
 
 class MaterialDesktopPositionIndicatorState
     extends State<MaterialDesktopPositionIndicator> {
+  static const _positionUiUpdateInterval = Duration(milliseconds: 66);
+
   late Duration position = controller(context).player.state.position;
   late Duration duration = controller(context).player.state.duration;
 
   final List<StreamSubscription> subscriptions = [];
+  Timer? _positionUpdateTimer;
+  Duration? _pendingPosition;
+  DateTime _lastPositionUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void setState(VoidCallback fn) {
@@ -1790,9 +1864,17 @@ class MaterialDesktopPositionIndicatorState
       subscriptions.addAll(
         [
           controller(context).player.stream.position.listen((event) {
-            setState(() {
-              position = event;
-            });
+            _pendingPosition = event;
+            final now = DateTime.now();
+            final elapsed = now.difference(_lastPositionUiUpdate);
+            if (elapsed >= _positionUiUpdateInterval) {
+              _flushPositionUpdate(now);
+            } else {
+              _positionUpdateTimer ??= Timer(
+                _positionUiUpdateInterval - elapsed,
+                _flushPositionUpdate,
+              );
+            }
           }),
           controller(context).player.stream.duration.listen((event) {
             setState(() {
@@ -1806,10 +1888,22 @@ class MaterialDesktopPositionIndicatorState
 
   @override
   void dispose() {
+    _positionUpdateTimer?.cancel();
     for (final subscription in subscriptions) {
       subscription.cancel();
     }
     super.dispose();
+  }
+
+  void _flushPositionUpdate([DateTime? timestamp]) {
+    _positionUpdateTimer?.cancel();
+    _positionUpdateTimer = null;
+    if (!mounted || _pendingPosition == null) return;
+
+    position = _pendingPosition!;
+    _pendingPosition = null;
+    _lastPositionUiUpdate = timestamp ?? DateTime.now();
+    setState(() {});
   }
 
   @override
@@ -1878,7 +1972,7 @@ class _DanmakuHeatmapPainter extends CustomPainter {
         final prevX = (i - 1) * stepX;
         final prevY = size.height - (heatmap[i - 1] * size.height);
         final controlPointX = prevX + (stepX / 2);
-        
+
         path.cubicTo(
           controlPointX, prevY,
           controlPointX, y,
