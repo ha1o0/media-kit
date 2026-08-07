@@ -85,6 +85,12 @@ class VideoOutput {
   void SetGPUThreadPriority(int priority);
 
  private:
+  struct GpuSurfaceTextureState {
+    FlutterDesktopGpuSurfaceDescriptor descriptor{};
+    D3D11Renderer* renderer = nullptr;
+    HANDLE acquired_handle = nullptr;
+  };
+
   void NotifyRender();
 
   void Render();
@@ -121,8 +127,7 @@ class VideoOutput {
   // H/W rendering.
 
   std::unique_ptr<D3D11Renderer> d3d11_renderer_ = nullptr;
-  std::unordered_map<int64_t,
-                     std::unique_ptr<FlutterDesktopGpuSurfaceDescriptor>>
+  std::unordered_map<int64_t, std::unique_ptr<GpuSurfaceTextureState>>
       textures_ = {};
 
   // S/W rendering.

@@ -9,6 +9,7 @@
 #include "video_output_manager.h"
 
 #include "gpu_thread_priority.h"
+#include "video_output_mode.h"
 
 VideoOutputManager::VideoOutputManager(
     flutter::PluginRegistrarWindows* registrar)
@@ -59,6 +60,11 @@ void VideoOutputManager::SetGPUThreadPriority(int priority) {
       entry.second->SetGPUThreadPriority(normalized);
     }
   }).detach();
+}
+
+void VideoOutputManager::SetVideoOutputMode(int mode) {
+  const auto normalized = media_kit_video::NormalizeVideoOutputMode(mode);
+  media_kit_video::g_video_output_mode.store(static_cast<int>(normalized));
 }
 
 void VideoOutputManager::Dispose(int64_t handle) {

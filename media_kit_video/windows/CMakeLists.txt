@@ -28,6 +28,7 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
     ${PLUGIN_NAME} SHARED
     "d3d11_renderer.cc"
     "d3d11_anime4k_processor.cc"
+    "fixed_handle_texture_bridge.cc"
     "mailbox_swap_chain.cc"
     "media_kit_video_plugin_c_api.cc"
     "media_kit_video_plugin.cc"

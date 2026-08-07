@@ -10,6 +10,8 @@
 
 #include <algorithm>
 
+#include "video_output_mode.h"
+
 // Limit the frame size to 1080p in software rendering.
 // This is for performance reasons & to avoid allocating too much memory.
 #define SW_RENDERING_MAX_WIDTH 1920
@@ -46,7 +48,8 @@ VideoOutput::VideoOutput(int64_t handle,
 
         d3d11_renderer_ = std::make_unique<D3D11Renderer>(
             static_cast<int32_t>(width_.value_or(1)),
-            static_cast<int32_t>(height_.value_or(1)), flutter_adapter);
+            static_cast<int32_t>(height_.value_or(1)), flutter_adapter,
+            media_kit_video::GetVideoOutputMode());
         mpv_d3d11_init_params d3d11_init_params{
             d3d11_renderer_->device(),
         };
@@ -234,6 +237,14 @@ void VideoOutput::Render() {
         };
         mpv_render_context_render(render_context_, params);
         frame_available = d3d11_renderer_->ProducerCommit();
+      } else if (d3d11_renderer_->ShouldSkipRendering()) {
+        int skip_rendering = 1;
+        mpv_render_param params[]{
+            {MPV_RENDER_PARAM_SKIP_RENDERING, &skip_rendering},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
+        };
+        mpv_render_context_render(render_context_, params);
+        frame_available = d3d11_renderer_->ProducerCommit();
       }
     }
     // S/W
@@ -350,56 +361,76 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
   std::cout << required_width << " " << required_height << std::endl;
   // Unregister previously registered texture & delete underlying objects.
   if (texture_id_) {
+    const int64_t id = texture_id_;
+    const bool wait_for_unregister =
+        d3d11_renderer_ && d3d11_renderer_->UsesNonBlockingMailbox();
+    auto unregister_completed =
+        wait_for_unregister ? std::make_shared<std::promise<void>>() : nullptr;
+    std::future<void> unregister_future;
+    if (unregister_completed) {
+      unregister_future = unregister_completed->get_future();
+    }
     registrar_->texture_registrar()->UnregisterTexture(
-        texture_id_, [&, id = texture_id_]() {
+        id, [this, id, unregister_completed]() {
           if (id) {
             std::cout << "media_kit: VideoOutput: Free Texture: " << id
                       << std::endl;
             std::lock_guard<std::mutex> lock(textures_mutex_);
-            if (destroyed_) {
-              return;
-            }
-            if (texture_variants_.find(id) != texture_variants_.end()) {
+            if (!destroyed_) {
               texture_variants_.erase(id);
-            }
-            // H/W
-            if (textures_.find(id) != textures_.end()) {
               textures_.erase(id);
-            }
-            // S/W
-            if (pixel_buffer_textures_.find(id) !=
-                pixel_buffer_textures_.end()) {
               pixel_buffer_textures_.erase(id);
             }
           }
+          if (unregister_completed) {
+            unregister_completed->set_value();
+          }
         });
     texture_id_ = 0;
+    if (unregister_completed) {
+      unregister_future.wait();
+    }
   }
   // H/W
   if (d3d11_renderer_ != nullptr) {
     d3d11_renderer_->SetSize(static_cast<int32_t>(required_width),
                              static_cast<int32_t>(required_height));
-    auto texture = std::make_unique<FlutterDesktopGpuSurfaceDescriptor>();
-    texture->struct_size = sizeof(FlutterDesktopGpuSurfaceDescriptor);
-    texture->handle = d3d11_renderer_->ReadHandleSnapshot();
-    texture->width = texture->visible_width = d3d11_renderer_->width();
-    texture->height = texture->visible_height = d3d11_renderer_->height();
-    texture->release_context = nullptr;
-    texture->release_callback = [](void*) {};
-    texture->format = kFlutterDesktopPixelFormatBGRA8888;
+    auto texture = std::make_unique<GpuSurfaceTextureState>();
+    auto* texture_state = texture.get();
+    auto& descriptor = texture->descriptor;
+    texture->renderer = d3d11_renderer_.get();
+    descriptor.struct_size = sizeof(FlutterDesktopGpuSurfaceDescriptor);
+    descriptor.handle = d3d11_renderer_->ReadHandleSnapshot();
+    descriptor.width = descriptor.visible_width = d3d11_renderer_->width();
+    descriptor.height = descriptor.visible_height = d3d11_renderer_->height();
+    if (d3d11_renderer_->UsesNonBlockingMailbox()) {
+      descriptor.release_context = texture_state;
+      descriptor.release_callback = [](void* context) {
+        auto* state = static_cast<GpuSurfaceTextureState*>(context);
+        if (state && state->renderer && state->acquired_handle) {
+          state->renderer->ConsumerRelease(state->acquired_handle);
+        }
+      };
+    } else {
+      descriptor.release_context = nullptr;
+      descriptor.release_callback = nullptr;
+    }
+    descriptor.format = kFlutterDesktopPixelFormatBGRA8888;
     auto texture_variant =
         std::make_unique<flutter::TextureVariant>(flutter::GpuSurfaceTexture(
-            kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle, [&](auto, auto) {
+            kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle,
+            [this, texture_state](auto, auto) {
               std::lock_guard<std::mutex> lock(textures_mutex_);
-              if (texture_id_) {
-                auto* descriptor = textures_.at(texture_id_).get();
-                const auto handle = d3d11_renderer_->ConsumerAcquire();
-                if (!handle) return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
-                descriptor->handle = handle;
-                return descriptor;
-              } else {
+              if (destroyed_ || !texture_state->renderer) {
                 return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
               }
+              const auto handle = texture_state->renderer->ConsumerAcquire();
+              if (!handle) {
+                return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
+              }
+              texture_state->acquired_handle = handle;
+              texture_state->descriptor.handle = handle;
+              return &texture_state->descriptor;
             }));
     // Register new texture.
     texture_id_ =

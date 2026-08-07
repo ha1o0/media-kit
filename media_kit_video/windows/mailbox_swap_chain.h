@@ -26,6 +26,7 @@ class MailboxSwapChain final : public IDXGISwapChain {
   static HRESULT Create(ID3D11Device* device,
                         int32_t width,
                         int32_t height,
+                        bool non_blocking,
                         MailboxSwapChain** out);
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,
@@ -84,6 +85,7 @@ class MailboxSwapChain final : public IDXGISwapChain {
   ID3D11Texture2D* RenderTarget();
   bool ProducerCommit();
   HANDLE ConsumerAcquire();
+  void ConsumerRelease(HANDLE handle);
   HRESULT Resize(int32_t width, int32_t height);
 
   HANDLE ReadHandleSnapshot();
@@ -101,12 +103,27 @@ class MailboxSwapChain final : public IDXGISwapChain {
   HRESULT AllocateSlots();
   void ReleaseSlots();
   HRESULT WaitForSlot(int slot);
+  ID3D11Texture2D* RenderTargetNonBlocking();
+  bool ProducerCommitNonBlocking();
+  bool PromoteCompletedFrames();
+  bool TakePublishedFrame();
+  void ResetNonBlockingState();
+
+  enum class SlotState {
+    kFree,
+    kWriting,
+    kPending,
+    kPublished,
+    kRetired,
+  };
 
   struct TextureSlot {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     HANDLE shared_handle = nullptr;
     Microsoft::WRL::ComPtr<ID3D11Fence> fence;
     uint64_t fence_value = 0;
+    uint64_t submission_id = 0;
+    SlotState state = SlotState::kFree;
   };
 
   ID3D11Device* device_ = nullptr;
@@ -119,8 +136,12 @@ class MailboxSwapChain final : public IDXGISwapChain {
 
   std::mutex slots_mutex_;
   HANDLE fence_event_ = nullptr;
+  bool non_blocking_ = false;
+
   std::atomic<bool> has_completed_frame_{false};
   std::atomic<int> latest_completed_slot_{-1};
+  uint64_t next_submission_id_ = 0;
+  bool published_frame_pending_ = false;
   int next_write_slot_ = 0;
   int write_slot_ = -1;
 

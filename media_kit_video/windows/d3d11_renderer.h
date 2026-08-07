@@ -19,7 +19,9 @@
 #include <memory>
 
 #include "d3d11_anime4k_processor.h"
+#include "fixed_handle_texture_bridge.h"
 #include "mailbox_swap_chain.h"
+#include "video_output_mode.h"
 
 class D3D11Renderer {
  public:
@@ -31,7 +33,8 @@ class D3D11Renderer {
 
   explicit D3D11Renderer(int32_t width,
                          int32_t height,
-                         IDXGIAdapter* flutter_adapter = nullptr);
+                         IDXGIAdapter* flutter_adapter,
+                         media_kit_video::VideoOutputMode output_mode);
   ~D3D11Renderer();
 
   void SetSize(int32_t width, int32_t height);
@@ -39,11 +42,20 @@ class D3D11Renderer {
   void SetGPUThreadPriority(int priority);
   bool ProducerCommit();
   HANDLE ConsumerAcquire();
+  void ConsumerRelease(HANDLE handle);
   HANDLE ReadHandleSnapshot() const;
+  bool UsesNonBlockingMailbox() const {
+    return output_mode_ ==
+           media_kit_video::VideoOutputMode::kNonBlockingMailbox;
+  }
+  bool ShouldSkipRendering() const {
+    return UsesNonBlockingMailbox();
+  }
 
  private:
   bool CreateD3D11Device(IDXGIAdapter* flutter_adapter);
-  bool CreateMailbox();
+  bool CreateFrameBridge();
+  ID3D11Texture2D* FrameRenderTarget();
 
   int32_t width_ = 1;
   int32_t height_ = 1;
@@ -51,7 +63,10 @@ class D3D11Renderer {
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_11_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d_11_device_context_;
   Microsoft::WRL::ComPtr<MailboxSwapChain> mailbox_swap_chain_;
+  std::unique_ptr<FixedHandleTextureBridge> fixed_handle_bridge_;
   std::unique_ptr<D3D11Anime4KProcessor> anime4k_processor_;
+  media_kit_video::VideoOutputMode output_mode_ =
+      media_kit_video::kDefaultVideoOutputMode;
   bool anime4k_enabled_ = false;
   bool anime4k_frame_pending_ = false;
 };

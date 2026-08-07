@@ -8,6 +8,7 @@
 #include "media_kit_video_plugin.h"
 #include "utils.h"
 #include "gpu_thread_priority.h"
+#include "video_output_mode.h"
 
 #include <Windows.h>
 
@@ -227,6 +228,21 @@ void MediaKitVideoPlugin::HandleMethodCall(
       }
     }
     video_output_manager_->SetGPUThreadPriority(priority);
+    result->Success(flutter::EncodableValue(std::monostate{}));
+  } else if (method_call.method_name().compare(
+                 "VideoOutputManager.SetVideoOutputMode") == 0) {
+    const auto& arguments =
+        std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto value = arguments.find(flutter::EncodableValue("mode"));
+    int mode = static_cast<int>(media_kit_video::kDefaultVideoOutputMode);
+    if (value != arguments.end()) {
+      if (const auto* int32_value = std::get_if<int32_t>(&value->second)) {
+        mode = *int32_value;
+      } else if (const auto* int64_value = std::get_if<int64_t>(&value->second)) {
+        mode = static_cast<int>(*int64_value);
+      }
+    }
+    video_output_manager_->SetVideoOutputMode(mode);
     result->Success(flutter::EncodableValue(std::monostate{}));
   } else if (method_call.method_name().compare(
                  "VideoOutputManager.SetPostProcessingEffect") == 0) {

@@ -20,18 +20,20 @@
 
 D3D11Renderer::D3D11Renderer(int32_t width,
                              int32_t height,
-                             IDXGIAdapter* flutter_adapter)
-    : width_(width), height_(height) {
+                             IDXGIAdapter* flutter_adapter,
+                             media_kit_video::VideoOutputMode output_mode)
+    : width_(width), height_(height), output_mode_(output_mode) {
   if (!CreateD3D11Device(flutter_adapter)) {
     throw std::runtime_error("Unable to create Direct3D 11 device.");
   }
-  if (!CreateMailbox()) {
-    throw std::runtime_error("Unable to create mailbox textures.");
+  if (!CreateFrameBridge()) {
+    throw std::runtime_error("Unable to create D3D11 frame bridge.");
   }
 }
 
 D3D11Renderer::~D3D11Renderer() {
   anime4k_processor_.reset(nullptr);
+  fixed_handle_bridge_.reset(nullptr);
   mailbox_swap_chain_.Reset();
   d3d_11_device_context_.Reset();
   d3d_11_device_.Reset();
@@ -39,11 +41,15 @@ D3D11Renderer::~D3D11Renderer() {
 
 ID3D11Texture2D* D3D11Renderer::render_target() {
   anime4k_frame_pending_ = false;
-  if (!mailbox_swap_chain_) {
+  if (!mailbox_swap_chain_ && !fixed_handle_bridge_) {
     return nullptr;
   }
+
+  ID3D11Texture2D* frame_target = FrameRenderTarget();
+  if (!frame_target) return nullptr;
+
   if (!anime4k_enabled_) {
-    return mailbox_swap_chain_->RenderTarget();
+    return frame_target;
   }
 
   if (!anime4k_processor_) {
@@ -51,7 +57,7 @@ ID3D11Texture2D* D3D11Renderer::render_target() {
         d3d_11_device_.Get(), d3d_11_device_context_.Get());
   }
   if (!anime4k_processor_->EnsureSize(width_, height_)) {
-    return mailbox_swap_chain_->RenderTarget();
+    return frame_target;
   }
 
   anime4k_frame_pending_ = true;
@@ -72,6 +78,14 @@ void D3D11Renderer::SetSize(int32_t width, int32_t height) {
                 << std::hex << hr << std::dec << ")" << std::endl;
     }
   }
+  if (fixed_handle_bridge_) {
+    const HRESULT hr = fixed_handle_bridge_->Resize(width_, height_);
+    if (FAILED(hr)) {
+      std::cout << "media_kit: D3D11Renderer: fixed handle resize failed "
+                   "(hr=0x"
+                << std::hex << hr << std::dec << ")" << std::endl;
+    }
+  }
 }
 
 void D3D11Renderer::SetAnime4KEnabled(bool enabled) {
@@ -83,10 +97,10 @@ void D3D11Renderer::SetAnime4KEnabled(bool enabled) {
 }
 
 bool D3D11Renderer::ProducerCommit() {
-  if (mailbox_swap_chain_) {
+  if (mailbox_swap_chain_ || fixed_handle_bridge_) {
     if (anime4k_frame_pending_ && anime4k_processor_ &&
         anime4k_processor_->input_texture()) {
-      ID3D11Texture2D* output = mailbox_swap_chain_->RenderTarget();
+      ID3D11Texture2D* output = FrameRenderTarget();
       if (output && !anime4k_processor_->Process(output)) {
         d3d_11_device_context_->CopyResource(
             output, anime4k_processor_->input_texture());
@@ -96,18 +110,28 @@ bool D3D11Renderer::ProducerCommit() {
       }
     }
     anime4k_frame_pending_ = false;
-    return mailbox_swap_chain_->ProducerCommit();
+    return mailbox_swap_chain_ ? mailbox_swap_chain_->ProducerCommit()
+                               : fixed_handle_bridge_->ProducerCommit();
   }
   return false;
 }
 
 HANDLE D3D11Renderer::ConsumerAcquire() {
-  return mailbox_swap_chain_ ? mailbox_swap_chain_->ConsumerAcquire() : nullptr;
+  if (mailbox_swap_chain_) return mailbox_swap_chain_->ConsumerAcquire();
+  return fixed_handle_bridge_ ? fixed_handle_bridge_->ConsumerAcquire()
+                              : nullptr;
+}
+
+void D3D11Renderer::ConsumerRelease(HANDLE handle) {
+  if (mailbox_swap_chain_) {
+    mailbox_swap_chain_->ConsumerRelease(handle);
+  }
 }
 
 HANDLE D3D11Renderer::ReadHandleSnapshot() const {
-  return mailbox_swap_chain_ ? mailbox_swap_chain_->ReadHandleSnapshot()
-                             : nullptr;
+  if (mailbox_swap_chain_) return mailbox_swap_chain_->ReadHandleSnapshot();
+  return fixed_handle_bridge_ ? fixed_handle_bridge_->ReadHandleSnapshot()
+                              : nullptr;
 }
 
 bool D3D11Renderer::CreateD3D11Device(IDXGIAdapter* flutter_adapter) {
@@ -169,10 +193,26 @@ void D3D11Renderer::SetGPUThreadPriority(int priority) {
   }
 }
 
-bool D3D11Renderer::CreateMailbox() {
+bool D3D11Renderer::CreateFrameBridge() {
+  if (output_mode_ == media_kit_video::VideoOutputMode::kFixedHandleCopy) {
+    FixedHandleTextureBridge* raw = nullptr;
+    const HRESULT hr = FixedHandleTextureBridge::Create(
+        d3d_11_device_.Get(), width_, height_, &raw);
+    if (FAILED(hr)) {
+      std::cout << "media_kit: D3D11Renderer: "
+                   "FixedHandleTextureBridge::Create failed (hr=0x"
+                << std::hex << hr << std::dec << ")" << std::endl;
+      return false;
+    }
+    fixed_handle_bridge_.reset(raw);
+    return true;
+  }
+
   MailboxSwapChain* raw = nullptr;
-  const HRESULT hr =
-      MailboxSwapChain::Create(d3d_11_device_.Get(), width_, height_, &raw);
+  const bool non_blocking =
+      output_mode_ == media_kit_video::VideoOutputMode::kNonBlockingMailbox;
+  const HRESULT hr = MailboxSwapChain::Create(
+      d3d_11_device_.Get(), width_, height_, non_blocking, &raw);
   if (FAILED(hr)) {
     std::cout << "media_kit: D3D11Renderer: MailboxSwapChain::Create failed "
                  "(hr=0x"
@@ -181,4 +221,9 @@ bool D3D11Renderer::CreateMailbox() {
   }
   mailbox_swap_chain_.Attach(raw);
   return true;
+}
+
+ID3D11Texture2D* D3D11Renderer::FrameRenderTarget() {
+  if (mailbox_swap_chain_) return mailbox_swap_chain_->RenderTarget();
+  return fixed_handle_bridge_ ? fixed_handle_bridge_->RenderTarget() : nullptr;
 }

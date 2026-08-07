@@ -22,6 +22,7 @@ MailboxSwapChain::~MailboxSwapChain() {
 HRESULT MailboxSwapChain::Create(ID3D11Device* device,
                                   int32_t width,
                                   int32_t height,
+                                  bool non_blocking,
                                   MailboxSwapChain** out) {
   if (!device || !out) return E_INVALIDARG;
 
@@ -31,6 +32,10 @@ HRESULT MailboxSwapChain::Create(ID3D11Device* device,
   p->device_ = device;
   p->width_ = width > 0 ? width : 1;
   p->height_ = height > 0 ? height : 1;
+  p->non_blocking_ = non_blocking;
+  if (non_blocking) {
+    p->ResetNonBlockingState();
+  }
   p->fence_event_ = ::CreateEvent(nullptr, FALSE, FALSE, nullptr);
   if (!p->fence_event_) {
     const DWORD error = ::GetLastError();
@@ -118,6 +123,11 @@ HRESULT STDMETHODCALLTYPE MailboxSwapChain::GetDesc(DXGI_SWAP_CHAIN_DESC* desc) 
 }
 
 ID3D11Texture2D* MailboxSwapChain::RenderTarget() {
+  if (non_blocking_) {
+    std::lock_guard<std::mutex> lock(slots_mutex_);
+    return RenderTargetNonBlocking();
+  }
+
   std::lock_guard<std::mutex> lock(slots_mutex_);
 
   if (write_slot_ >= 0) {
@@ -129,6 +139,11 @@ ID3D11Texture2D* MailboxSwapChain::RenderTarget() {
 }
 
 bool MailboxSwapChain::ProducerCommit() {
+  if (non_blocking_) {
+    std::lock_guard<std::mutex> lock(slots_mutex_);
+    return ProducerCommitNonBlocking();
+  }
+
   int submitted_slot = -1;
   {
     std::lock_guard<std::mutex> lock(slots_mutex_);
@@ -177,6 +192,24 @@ HANDLE MailboxSwapChain::ConsumerAcquire() {
   return slots_[slot].shared_handle;
 }
 
+void MailboxSwapChain::ConsumerRelease(HANDLE handle) {
+  if (!non_blocking_ || !handle) return;
+
+  std::lock_guard<std::mutex> lock(slots_mutex_);
+  const int published =
+      latest_completed_slot_.load(std::memory_order_acquire);
+  if (published < 0 || slots_[published].shared_handle != handle) return;
+
+  // Flutter invokes the descriptor release callback after opening |handle| and
+  // releasing its previously bound EGL image. Only now may older published
+  // textures be rendered into again.
+  for (auto& slot : slots_) {
+    if (slot.state == SlotState::kRetired) {
+      slot.state = SlotState::kFree;
+    }
+  }
+}
+
 HANDLE MailboxSwapChain::ReadHandleSnapshot() {
   std::lock_guard<std::mutex> lock(slots_mutex_);
   if (!has_completed_frame_.load(std::memory_order_acquire)) return nullptr;
@@ -193,9 +226,13 @@ HRESULT MailboxSwapChain::Resize(int32_t width, int32_t height) {
   width_ = width > 0 ? width : 1;
   height_ = height > 0 ? height : 1;
   has_completed_frame_.store(false, std::memory_order_release);
-  latest_completed_slot_.store(-1, std::memory_order_release);
-  next_write_slot_ = 0;
-  write_slot_ = -1;
+  if (non_blocking_) {
+    ResetNonBlockingState();
+  } else {
+    latest_completed_slot_.store(-1, std::memory_order_release);
+    next_write_slot_ = 0;
+    write_slot_ = -1;
+  }
   return AllocateSlots();
 }
 
@@ -242,6 +279,120 @@ HRESULT MailboxSwapChain::AllocateSlots() {
   return S_OK;
 }
 
+bool MailboxSwapChain::ProducerCommitNonBlocking() {
+  if (write_slot_ < 0) {
+    PromoteCompletedFrames();
+    return TakePublishedFrame();
+  }
+
+  const int submitted_slot = write_slot_;
+  const bool needs_first_frame =
+      !has_completed_frame_.load(std::memory_order_acquire);
+  auto& write = slots_[submitted_slot];
+  const HRESULT signal_hr =
+      context4_->Signal(write.fence.Get(), ++write.fence_value);
+  if (FAILED(signal_hr)) {
+    write.state = SlotState::kFree;
+    write_slot_ = -1;
+    return TakePublishedFrame();
+  }
+
+  write.submission_id = ++next_submission_id_;
+  write.state = SlotState::kPending;
+  write_slot_ = -1;
+
+  // Flush submits the fence but does not wait for it. Without this, a full
+  // mailbox can stop issuing D3D work before the queued fences become visible.
+  context4_->Flush();
+
+  // Flutter has no valid surface immediately after a texture rebuild. Wait
+  // only for that first frame so a resize never exposes an empty/black frame;
+  // steady-state publication remains fully non-blocking.
+  if (needs_first_frame && FAILED(WaitForSlot(submitted_slot))) {
+    return false;
+  }
+  PromoteCompletedFrames();
+  return TakePublishedFrame();
+}
+
+ID3D11Texture2D* MailboxSwapChain::RenderTargetNonBlocking() {
+  if (write_slot_ >= 0) {
+    return slots_[write_slot_].texture.Get();
+  }
+
+  PromoteCompletedFrames();
+  for (int slot = 0; slot < 4; ++slot) {
+    if (slots_[slot].state == SlotState::kFree) {
+      slots_[slot].state = SlotState::kWriting;
+      write_slot_ = slot;
+      return slots_[slot].texture.Get();
+    }
+  }
+
+  return nullptr;
+}
+
+bool MailboxSwapChain::PromoteCompletedFrames() {
+  int newest_completed = -1;
+  uint64_t newest_submission = 0;
+
+  for (int slot = 0; slot < 4; ++slot) {
+    const auto& candidate = slots_[slot];
+    if (candidate.state != SlotState::kPending || !candidate.fence ||
+        candidate.fence->GetCompletedValue() < candidate.fence_value) {
+      continue;
+    }
+    if (newest_completed < 0 ||
+        candidate.submission_id > newest_submission) {
+      newest_completed = slot;
+      newest_submission = candidate.submission_id;
+    }
+  }
+
+  if (newest_completed < 0) return false;
+
+  const int previously_published =
+      latest_completed_slot_.load(std::memory_order_acquire);
+  if (previously_published >= 0 && previously_published != newest_completed &&
+      slots_[previously_published].state == SlotState::kPublished) {
+    slots_[previously_published].state = SlotState::kRetired;
+  }
+
+  for (int slot = 0; slot < 4; ++slot) {
+    auto& candidate = slots_[slot];
+    if (candidate.state == SlotState::kPending &&
+        candidate.fence->GetCompletedValue() >= candidate.fence_value) {
+      candidate.state =
+          slot == newest_completed ? SlotState::kPublished : SlotState::kFree;
+    }
+  }
+
+  latest_completed_slot_.store(newest_completed, std::memory_order_release);
+  has_completed_frame_.store(true, std::memory_order_release);
+  published_frame_pending_ = true;
+  return true;
+}
+
+bool MailboxSwapChain::TakePublishedFrame() {
+  const bool result = published_frame_pending_;
+  published_frame_pending_ = false;
+  return result;
+}
+
+void MailboxSwapChain::ResetNonBlockingState() {
+  next_submission_id_ = 0;
+  published_frame_pending_ = false;
+  write_slot_ = -1;
+  // A newly allocated texture is not a frame. Keep every handle unpublished
+  // until its first render fence completes to avoid exposing a black resize.
+  has_completed_frame_.store(false, std::memory_order_release);
+  latest_completed_slot_.store(-1, std::memory_order_release);
+  for (auto& slot : slots_) {
+    slot.submission_id = 0;
+    slot.state = SlotState::kFree;
+  }
+}
+
 HRESULT MailboxSwapChain::WaitForSlot(int slot) {
   if (slot < 0 || slot >= 4) return E_INVALIDARG;
 
@@ -265,5 +416,7 @@ void MailboxSwapChain::ReleaseSlots() {
     slot.shared_handle = nullptr;
     slot.fence.Reset();
     slot.fence_value = 0;
+    slot.submission_id = 0;
+    slot.state = SlotState::kFree;
   }
 }
