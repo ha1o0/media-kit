@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <optional>
+#include <map>
 #include <string>
 
 #include <client.h>
@@ -25,6 +26,7 @@
 #include <flutter/standard_method_codec.h>
 
 #include "d3d11_renderer.h"
+#include "performance_metrics.h"
 #include "thread_pool.h"
 
 typedef struct _VideoOutputConfiguration {
@@ -42,6 +44,10 @@ typedef struct _VideoOutputConfiguration {
         enable_hardware_acceleration(enable_hardware_acceleration),
         render_backend(render_backend) {}
 } VideoOutputConfiguration;
+
+struct VideoOutputPerformanceSnapshot {
+  std::map<std::string, std::string> mpv_properties;
+};
 
 class VideoOutput {
  public:
@@ -83,6 +89,7 @@ class VideoOutput {
 
   void SetAnime4KEnabled(bool enabled);
   void SetGPUThreadPriority(int priority);
+  VideoOutputPerformanceSnapshot GetPerformanceSnapshot() const;
 
  private:
   struct GpuSurfaceTextureState {
@@ -118,6 +125,7 @@ class VideoOutput {
   std::atomic<bool> destroyed_{false};
   std::atomic<bool> render_task_pending_{false};
   std::atomic<bool> render_requested_{false};
+  std::atomic<HANDLE> last_texture_handle_{nullptr};
 
   std::mutex textures_mutex_ = std::mutex();
 

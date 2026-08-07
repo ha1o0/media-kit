@@ -11,9 +11,12 @@
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
+#include <string>
+#include <chrono>
 
 #include "utils.h"
 #include "gpu_thread_priority.h"
+#include "performance_metrics.h"
 
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -110,6 +113,7 @@ bool D3D11Renderer::ProducerCommit() {
       }
     }
     anime4k_frame_pending_ = false;
+    media_kit_video::PerformanceMetrics::Instance().AddProducerCommit();
     return mailbox_swap_chain_ ? mailbox_swap_chain_->ProducerCommit()
                                : fixed_handle_bridge_->ProducerCommit();
   }
@@ -117,9 +121,22 @@ bool D3D11Renderer::ProducerCommit() {
 }
 
 HANDLE D3D11Renderer::ConsumerAcquire() {
-  if (mailbox_swap_chain_) return mailbox_swap_chain_->ConsumerAcquire();
-  return fixed_handle_bridge_ ? fixed_handle_bridge_->ConsumerAcquire()
-                              : nullptr;
+  auto& metrics = media_kit_video::PerformanceMetrics::Instance();
+  const bool collect_metrics = metrics.enabled();
+  std::chrono::steady_clock::time_point start;
+  if (collect_metrics) start = std::chrono::steady_clock::now();
+  const auto handle = mailbox_swap_chain_
+                          ? mailbox_swap_chain_->ConsumerAcquire()
+                          : fixed_handle_bridge_
+                                ? fixed_handle_bridge_->ConsumerAcquire()
+                                : nullptr;
+  if (collect_metrics) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - start);
+    metrics.ObserveConsumerAcquireDuration(
+        static_cast<uint64_t>(elapsed.count() < 0 ? 0 : elapsed.count()));
+  }
+  return handle;
 }
 
 void D3D11Renderer::ConsumerRelease(HANDLE handle) {
@@ -177,7 +194,31 @@ bool D3D11Renderer::CreateD3D11Device(IDXGIAdapter* flutter_adapter) {
 
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
   if (SUCCEEDED(d3d_11_device_.As(&dxgi_device)) && dxgi_device) {
-    media_kit_video::ApplyGpuThreadPriority(dxgi_device.Get());
+    int applied_priority = media_kit_video::kUnknownGpuThreadPriority;
+    const HRESULT priority_hr =
+        media_kit_video::ApplyGpuThreadPriority(dxgi_device.Get(),
+                                                &applied_priority);
+    media_kit_video::PerformanceMetrics::Instance().SetGpuPriorityResult(
+        media_kit_video::g_gpu_thread_priority.load(), applied_priority,
+        static_cast<long>(priority_hr));
+    Microsoft::WRL::ComPtr<IDXGIAdapter> device_adapter;
+    if (SUCCEEDED(dxgi_device->GetAdapter(&device_adapter)) &&
+        device_adapter) {
+      DXGI_ADAPTER_DESC desc = {};
+      if (SUCCEEDED(device_adapter->GetDesc(&desc))) {
+        int length = ::WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1,
+                                           nullptr, 0, nullptr, nullptr);
+        if (length > 1) {
+          std::string description(static_cast<size_t>(length), '\0');
+          ::WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1,
+                                description.data(), length, nullptr, nullptr);
+          description.resize(static_cast<size_t>(length - 1));
+          gpu_adapter_ = description;
+        }
+      }
+    }
+    media_kit_video::PerformanceMetrics::Instance().SetGpuAdapter(
+        gpu_adapter_);
   }
 
   return true;
@@ -189,7 +230,13 @@ void D3D11Renderer::SetGPUThreadPriority(int priority) {
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
   if (d3d_11_device_ &&
       SUCCEEDED(d3d_11_device_.As(&dxgi_device)) && dxgi_device) {
-    media_kit_video::ApplyGpuThreadPriority(dxgi_device.Get());
+    int applied_priority = media_kit_video::kUnknownGpuThreadPriority;
+    const HRESULT priority_hr =
+        media_kit_video::ApplyGpuThreadPriority(dxgi_device.Get(),
+                                                &applied_priority);
+    media_kit_video::PerformanceMetrics::Instance().SetGpuPriorityResult(
+        media_kit_video::g_gpu_thread_priority.load(), applied_priority,
+        static_cast<long>(priority_hr));
   }
 }
 

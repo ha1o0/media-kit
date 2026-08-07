@@ -8,8 +8,11 @@
 
 #include "mailbox_swap_chain.h"
 
+#include <chrono>
 #include <iostream>
 #include <new>
+
+#include "performance_metrics.h"
 
 MailboxSwapChain::~MailboxSwapChain() {
   ReleaseSlots();
@@ -150,20 +153,29 @@ bool MailboxSwapChain::ProducerCommit() {
 
     submitted_slot = write_slot_;
     if (submitted_slot < 0) {
+      media_kit_video::PerformanceMetrics::Instance()
+          .AddProducerCommitFailure();
       return false;
     }
 
     auto& slot = slots_[submitted_slot];
-    if (!slot.fence) return false;
+    if (!slot.fence) {
+      media_kit_video::PerformanceMetrics::Instance()
+          .AddProducerCommitFailure();
+      return false;
+    }
 
     const HRESULT signal_hr =
         context4_->Signal(slot.fence.Get(), ++slot.fence_value);
     if (FAILED(signal_hr)) {
       write_slot_ = -1;
+      media_kit_video::PerformanceMetrics::Instance()
+          .AddProducerCommitFailure();
       return false;
     }
 
     context4_->Flush();
+    media_kit_video::PerformanceMetrics::Instance().AddFlush();
     write_slot_ = -1;
   }
 
@@ -171,7 +183,11 @@ bool MailboxSwapChain::ProducerCommit() {
   // consuming the most recently completed texture instead of blocking its
   // render thread behind the producer.
   const HRESULT hr = WaitForSlot(submitted_slot);
-  if (FAILED(hr)) return false;
+  if (FAILED(hr)) {
+    media_kit_video::PerformanceMetrics::Instance()
+        .AddProducerCommitFailure();
+    return false;
+  }
 
   {
     std::lock_guard<std::mutex> lock(slots_mutex_);
@@ -179,6 +195,7 @@ bool MailboxSwapChain::ProducerCommit() {
     has_completed_frame_.store(true, std::memory_order_release);
     next_write_slot_ = (submitted_slot + 1) % 4;
   }
+  media_kit_video::PerformanceMetrics::Instance().AddPublish();
   return true;
 }
 
@@ -294,6 +311,8 @@ bool MailboxSwapChain::ProducerCommitNonBlocking() {
   if (FAILED(signal_hr)) {
     write.state = SlotState::kFree;
     write_slot_ = -1;
+    media_kit_video::PerformanceMetrics::Instance()
+        .AddProducerCommitFailure();
     return TakePublishedFrame();
   }
 
@@ -304,6 +323,7 @@ bool MailboxSwapChain::ProducerCommitNonBlocking() {
   // Flush submits the fence but does not wait for it. Without this, a full
   // mailbox can stop issuing D3D work before the queued fences become visible.
   context4_->Flush();
+  media_kit_video::PerformanceMetrics::Instance().AddFlush();
 
   // Flutter has no valid surface immediately after a texture rebuild. Wait
   // only for that first frame so a resize never exposes an empty/black frame;
@@ -329,17 +349,29 @@ ID3D11Texture2D* MailboxSwapChain::RenderTargetNonBlocking() {
     }
   }
 
+  media_kit_video::PerformanceMetrics::Instance().AddMailboxFull();
   return nullptr;
 }
 
 bool MailboxSwapChain::PromoteCompletedFrames() {
   int newest_completed = -1;
   uint64_t newest_submission = 0;
+  bool completed[4] = {};
+  uint64_t pending_count = 0;
 
   for (int slot = 0; slot < 4; ++slot) {
     const auto& candidate = slots_[slot];
-    if (candidate.state != SlotState::kPending || !candidate.fence ||
-        candidate.fence->GetCompletedValue() < candidate.fence_value) {
+    if (candidate.state != SlotState::kPending || !candidate.fence) {
+      continue;
+    }
+    ++pending_count;
+    media_kit_video::PerformanceMetrics::Instance()
+        .AddNonBlockingFencePoll();
+    completed[slot] =
+        candidate.fence->GetCompletedValue() >= candidate.fence_value;
+    if (!completed[slot]) {
+      media_kit_video::PerformanceMetrics::Instance()
+          .AddNonBlockingFenceIncomplete();
       continue;
     }
     if (newest_completed < 0 ||
@@ -348,8 +380,11 @@ bool MailboxSwapChain::PromoteCompletedFrames() {
       newest_submission = candidate.submission_id;
     }
   }
-
-  if (newest_completed < 0) return false;
+  if (newest_completed < 0) {
+    media_kit_video::PerformanceMetrics::Instance().SetPendingSlots(
+        pending_count);
+    return false;
+  }
 
   const int previously_published =
       latest_completed_slot_.load(std::memory_order_acquire);
@@ -360,16 +395,23 @@ bool MailboxSwapChain::PromoteCompletedFrames() {
 
   for (int slot = 0; slot < 4; ++slot) {
     auto& candidate = slots_[slot];
-    if (candidate.state == SlotState::kPending &&
-        candidate.fence->GetCompletedValue() >= candidate.fence_value) {
+    if (candidate.state == SlotState::kPending && completed[slot]) {
       candidate.state =
           slot == newest_completed ? SlotState::kPublished : SlotState::kFree;
     }
   }
 
+  uint64_t remaining_pending = 0;
+  for (const auto& slot : slots_) {
+    if (slot.state == SlotState::kPending) ++remaining_pending;
+  }
+  media_kit_video::PerformanceMetrics::Instance().SetPendingSlots(
+      remaining_pending);
+
   latest_completed_slot_.store(newest_completed, std::memory_order_release);
   has_completed_frame_.store(true, std::memory_order_release);
   published_frame_pending_ = true;
+  media_kit_video::PerformanceMetrics::Instance().AddPublish();
   return true;
 }
 
@@ -391,6 +433,7 @@ void MailboxSwapChain::ResetNonBlockingState() {
     slot.submission_id = 0;
     slot.state = SlotState::kFree;
   }
+  media_kit_video::PerformanceMetrics::Instance().SetPendingSlots(0);
 }
 
 HRESULT MailboxSwapChain::WaitForSlot(int slot) {
@@ -402,11 +445,23 @@ HRESULT MailboxSwapChain::WaitForSlot(int slot) {
     return S_OK;
   }
 
+  auto& metrics = media_kit_video::PerformanceMetrics::Instance();
+  const bool collect_metrics = metrics.enabled();
+  std::chrono::steady_clock::time_point start;
+  if (collect_metrics) start = std::chrono::steady_clock::now();
+  metrics.AddBlockingFenceWait();
+
   HRESULT hr = texture_slot.fence->SetEventOnCompletion(
       texture_slot.fence_value, fence_event_);
   if (FAILED(hr)) return hr;
 
   const DWORD wait = ::WaitForSingleObject(fence_event_, INFINITE);
+  if (collect_metrics) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - start);
+    metrics.ObserveBlockingWaitDuration(
+        static_cast<uint64_t>(elapsed.count() < 0 ? 0 : elapsed.count()));
+  }
   return wait == WAIT_OBJECT_0 ? S_OK : HRESULT_FROM_WIN32(::GetLastError());
 }
 

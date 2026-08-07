@@ -5,6 +5,8 @@
 #include <iostream>
 #include <new>
 
+#include "performance_metrics.h"
+
 FixedHandleTextureBridge::~FixedHandleTextureBridge() {
   ReleaseTextures();
 }
@@ -38,12 +40,18 @@ HRESULT FixedHandleTextureBridge::Create(ID3D11Device* device,
 }
 
 bool FixedHandleTextureBridge::ProducerCommit() {
-  if (!context_ || !render_texture_ || !shared_texture_) return false;
+  if (!context_ || !render_texture_ || !shared_texture_) {
+    media_kit_video::PerformanceMetrics::Instance()
+        .AddProducerCommitFailure();
+    return false;
+  }
 
   // Both operations remain on the GPU. Flush makes the copy visible to the
   // Flutter device which imports the stable shared HANDLE.
   context_->CopyResource(shared_texture_.Get(), render_texture_.Get());
+  media_kit_video::PerformanceMetrics::Instance().AddFixedHandleCopy();
   context_->Flush();
+  media_kit_video::PerformanceMetrics::Instance().AddFlush();
   return true;
 }
 

@@ -8,11 +8,215 @@
 #include "media_kit_video_plugin.h"
 #include "utils.h"
 #include "gpu_thread_priority.h"
+#include "performance_metrics.h"
 #include "video_output_mode.h"
 
 #include <Windows.h>
 
 namespace media_kit_video {
+
+namespace {
+
+const char* VideoOutputModeName(int mode) {
+  if (mode == 3) return "software";
+  switch (NormalizeVideoOutputMode(mode)) {
+    case VideoOutputMode::kNonBlockingMailbox:
+      return "nonBlockingMailbox";
+    case VideoOutputMode::kFixedHandleCopy:
+      return "fixedHandleCopy";
+    case VideoOutputMode::kBlockingMailbox:
+    default:
+      return "blockingMailbox";
+  }
+}
+
+void UpdateDisplayMetrics(HWND window) {
+  if (!window) return;
+
+  RECT rect = {};
+  ::GetClientRect(window, &rect);
+  int dpi = 0;
+  using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+  const auto user32 = ::GetModuleHandleW(L"user32.dll");
+  const auto get_dpi_for_window = user32
+                                      ? reinterpret_cast<GetDpiForWindowFn>(
+                                            ::GetProcAddress(
+                                                user32, "GetDpiForWindow"))
+                                      : nullptr;
+  if (get_dpi_for_window) {
+    dpi = static_cast<int>(get_dpi_for_window(window));
+  }
+
+  int refresh_rate = 0;
+  const auto monitor = ::MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+  MONITORINFOEXW monitor_info = {};
+  monitor_info.cbSize = sizeof(monitor_info);
+  if (monitor && ::GetMonitorInfoW(monitor, &monitor_info)) {
+    DEVMODEW mode = {};
+    mode.dmSize = sizeof(mode);
+    if (::EnumDisplaySettingsW(monitor_info.szDevice, ENUM_CURRENT_SETTINGS,
+                               &mode)) {
+      refresh_rate = static_cast<int>(mode.dmDisplayFrequency);
+    }
+  }
+
+  PerformanceMetrics::Instance().SetDisplayInfo(
+      static_cast<int64_t>(rect.right - rect.left),
+      static_cast<int64_t>(rect.bottom - rect.top), dpi, refresh_rate);
+}
+
+flutter::EncodableValue BuildPerformanceMetricsValue(
+    const PerformanceMetrics::Snapshot& snapshot,
+    int configured_mode,
+    bool mpv_snapshot_available,
+    const std::vector<VideoOutputPerformanceSnapshot>& outputs) {
+  using flutter::EncodableList;
+  using flutter::EncodableMap;
+  using flutter::EncodableValue;
+
+  const auto value = [](uint64_t input) {
+    return EncodableValue(static_cast<int64_t>(input));
+  };
+  EncodableMap counters{
+      {EncodableValue("renderRequests"), value(snapshot.render_requests)},
+      {EncodableValue("renderRequestsCoalesced"),
+       value(snapshot.render_request_coalesced)},
+      {EncodableValue("renderTasks"), value(snapshot.render_tasks)},
+      {EncodableValue("renderQueueWaitTotalUs"),
+       value(snapshot.render_queue_wait_total_us)},
+      {EncodableValue("renderQueueWaitMaxUs"),
+       value(snapshot.render_queue_wait_max_us)},
+      {EncodableValue("mpvRenderCalls"), value(snapshot.mpv_render_calls)},
+      {EncodableValue("skipRenderingCalls"),
+       value(snapshot.skip_rendering_calls)},
+      {EncodableValue("mpvRenderTotalUs"),
+       value(snapshot.mpv_render_total_us)},
+      {EncodableValue("mpvRenderMaxUs"), value(snapshot.mpv_render_max_us)},
+      {EncodableValue("producerCommitCalls"),
+       value(snapshot.producer_commits)},
+      {EncodableValue("producerCommitFailures"),
+       value(snapshot.producer_commit_failures)},
+      {EncodableValue("frameAvailableMarks"),
+       value(snapshot.frame_available_marks)},
+      {EncodableValue("frameAvailableFailures"),
+       value(snapshot.frame_available_failures)},
+      {EncodableValue("frameAvailableTotalUs"),
+       value(snapshot.frame_available_total_us)},
+      {EncodableValue("frameAvailableMaxUs"),
+       value(snapshot.frame_available_max_us)},
+      {EncodableValue("flutterTextureCallbacks"),
+       value(snapshot.flutter_texture_callbacks)},
+      {EncodableValue("flutterTextureCallbackTotalUs"),
+       value(snapshot.flutter_texture_callback_total_us)},
+      {EncodableValue("flutterTextureCallbackMaxUs"),
+       value(snapshot.flutter_texture_callback_max_us)},
+      {EncodableValue("consumerAcquireCalls"),
+       value(snapshot.consumer_acquire_calls)},
+      {EncodableValue("consumerAcquireTotalUs"),
+       value(snapshot.consumer_acquire_total_us)},
+      {EncodableValue("consumerAcquireMaxUs"),
+       value(snapshot.consumer_acquire_max_us)},
+      {EncodableValue("textureCallbackNoHandle"),
+       value(snapshot.texture_callback_no_handle)},
+      {EncodableValue("textureHandleChanges"),
+       value(snapshot.texture_handle_changes)},
+      {EncodableValue("textureRegistrations"),
+       value(snapshot.texture_registrations)},
+      {EncodableValue("textureResizes"), value(snapshot.texture_resizes)},
+      {EncodableValue("textureUnregisters"),
+       value(snapshot.texture_unregisters)},
+      {EncodableValue("flushes"), value(snapshot.flushes)},
+      {EncodableValue("blockingFenceWaits"),
+       value(snapshot.blocking_fence_waits)},
+      {EncodableValue("blockingWaitTotalUs"),
+       value(snapshot.blocking_wait_total_us)},
+      {EncodableValue("blockingWaitMaxUs"),
+       value(snapshot.blocking_wait_max_us)},
+      {EncodableValue("nonBlockingFencePolls"),
+       value(snapshot.nonblocking_fence_polls)},
+      {EncodableValue("nonBlockingFenceIncomplete"),
+       value(snapshot.nonblocking_fence_incomplete)},
+      {EncodableValue("publishes"), value(snapshot.publishes)},
+      {EncodableValue("pendingSlotsCurrent"),
+       value(snapshot.pending_slots_current)},
+      {EncodableValue("pendingSlotsMax"),
+       value(snapshot.pending_slots_max)},
+      {EncodableValue("mailboxFull"), value(snapshot.mailbox_full)},
+      {EncodableValue("fixedHandleCopies"),
+       value(snapshot.fixed_handle_copies)},
+      {EncodableValue("renderTargetMisses"),
+       value(snapshot.render_target_misses)},
+  };
+
+  EncodableList render_buckets;
+  for (const auto bucket : snapshot.mpv_render_buckets) {
+    render_buckets.emplace_back(value(bucket));
+  }
+  counters.emplace(EncodableValue("mpvRenderTimeBuckets"),
+                   EncodableValue(render_buckets));
+
+  EncodableList mpv_outputs;
+  int output_index = 0;
+  for (const auto& output : outputs) {
+    EncodableMap properties;
+    for (const auto& property : output.mpv_properties) {
+      properties.emplace(EncodableValue(property.first),
+                         EncodableValue(property.second));
+    }
+    mpv_outputs.emplace_back(EncodableMap{
+        {EncodableValue("outputIndex"), EncodableValue(output_index++)},
+        {EncodableValue("properties"), EncodableValue(properties)},
+    });
+  }
+
+  const auto actual_mode = snapshot.output_mode >= 0
+                               ? snapshot.output_mode
+                               : configured_mode;
+  return EncodableValue(EncodableMap{
+      {EncodableValue("schemaVersion"), EncodableValue(1)},
+      {EncodableValue("enabled"), EncodableValue(snapshot.enabled)},
+      {EncodableValue("enabledElapsedMs"),
+       value(snapshot.enabled_elapsed_ms)},
+      {EncodableValue("configuredOutputMode"),
+       EncodableValue(VideoOutputModeName(configured_mode))},
+      {EncodableValue("actualOutputMode"),
+       EncodableValue(VideoOutputModeName(actual_mode))},
+      {EncodableValue("activeOutputs"),
+       EncodableValue(snapshot.active_outputs)},
+      {EncodableValue("hardwareAcceleration"),
+       EncodableValue(snapshot.hardware_acceleration)},
+      {EncodableValue("renderBackend"),
+       EncodableValue(snapshot.render_backend)},
+      {EncodableValue("anime4kEnabled"),
+       EncodableValue(snapshot.anime4k_enabled)},
+      {EncodableValue("textureWidth"),
+       EncodableValue(snapshot.texture_width)},
+      {EncodableValue("textureHeight"),
+       EncodableValue(snapshot.texture_height)},
+      {EncodableValue("windowWidth"),
+       EncodableValue(snapshot.window_width)},
+      {EncodableValue("windowHeight"),
+       EncodableValue(snapshot.window_height)},
+      {EncodableValue("displayDpi"), EncodableValue(snapshot.display_dpi)},
+      {EncodableValue("displayRefreshRate"),
+       EncodableValue(snapshot.display_refresh_rate)},
+      {EncodableValue("gpuAdapter"), EncodableValue(snapshot.gpu_adapter)},
+      {EncodableValue("gpuPriorityRequested"),
+       EncodableValue(snapshot.gpu_priority_requested)},
+      {EncodableValue("gpuPriorityApplied"),
+       EncodableValue(snapshot.gpu_priority_applied)},
+      {EncodableValue("gpuPrioritySetHresult"),
+       EncodableValue(static_cast<int64_t>(snapshot.gpu_priority_hresult))},
+      {EncodableValue("gpuPrioritySetSucceeded"),
+       EncodableValue(SUCCEEDED(snapshot.gpu_priority_hresult))},
+      {EncodableValue("counters"), EncodableValue(counters)},
+      {EncodableValue("mpvOutputs"), EncodableValue(mpv_outputs)},
+      {EncodableValue("mpvSnapshotAvailable"),
+       EncodableValue(mpv_snapshot_available)},
+  });
+}
+
+}  // namespace
 
 MediaKitVideoPlugin* MediaKitVideoPlugin::instance_ = nullptr;
 
@@ -244,6 +448,26 @@ void MediaKitVideoPlugin::HandleMethodCall(
     }
     video_output_manager_->SetVideoOutputMode(mode);
     result->Success(flutter::EncodableValue(std::monostate{}));
+  } else if (method_call.method_name().compare(
+                 "VideoOutputManager.SetPerformanceMetricsEnabled") == 0) {
+    const auto& arguments =
+        std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto value = arguments.find(flutter::EncodableValue("enabled"));
+    const bool enabled =
+        value != arguments.end() && std::get<bool>(value->second);
+    PerformanceMetrics::Instance().SetEnabled(enabled);
+    result->Success(flutter::EncodableValue(std::monostate{}));
+  } else if (method_call.method_name().compare(
+                 "VideoOutputManager.GetPerformanceMetrics") == 0) {
+    UpdateDisplayMetrics(flutter_window_);
+    const auto snapshot = PerformanceMetrics::Instance().GetSnapshot();
+    const auto configured_mode =
+        static_cast<int>(media_kit_video::GetVideoOutputMode());
+    std::vector<VideoOutputPerformanceSnapshot> outputs;
+    const bool mpv_snapshot_available =
+        video_output_manager_->TryGetPerformanceSnapshots(&outputs);
+    result->Success(BuildPerformanceMetricsValue(
+        snapshot, configured_mode, mpv_snapshot_available, outputs));
   } else if (method_call.method_name().compare(
                  "VideoOutputManager.SetPostProcessingEffect") == 0) {
     auto arguments = std::get<flutter::EncodableMap>(*method_call.arguments());

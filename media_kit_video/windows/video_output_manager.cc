@@ -8,6 +8,8 @@
 
 #include "video_output_manager.h"
 
+#include <algorithm>
+
 #include "gpu_thread_priority.h"
 #include "video_output_mode.h"
 
@@ -65,6 +67,28 @@ void VideoOutputManager::SetGPUThreadPriority(int priority) {
 void VideoOutputManager::SetVideoOutputMode(int mode) {
   const auto normalized = media_kit_video::NormalizeVideoOutputMode(mode);
   media_kit_video::g_video_output_mode.store(static_cast<int>(normalized));
+}
+
+bool VideoOutputManager::TryGetPerformanceSnapshots(
+    std::vector<VideoOutputPerformanceSnapshot>* snapshots) {
+  if (!snapshots) return false;
+  std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+  if (!lock.owns_lock()) return false;
+  snapshots->clear();
+  snapshots->reserve(video_outputs_.size());
+  std::vector<std::pair<int64_t, VideoOutput*>> ordered_outputs;
+  ordered_outputs.reserve(video_outputs_.size());
+  for (const auto& entry : video_outputs_) {
+    ordered_outputs.emplace_back(entry.first, entry.second.get());
+  }
+  std::sort(ordered_outputs.begin(), ordered_outputs.end(),
+            [](const auto& left, const auto& right) {
+              return left.first < right.first;
+            });
+  for (const auto& entry : ordered_outputs) {
+    snapshots->emplace_back(entry.second->GetPerformanceSnapshot());
+  }
+  return true;
 }
 
 void VideoOutputManager::Dispose(int64_t handle) {

@@ -9,6 +9,7 @@
 #include "video_output.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include "video_output_mode.h"
 
@@ -146,10 +147,12 @@ VideoOutput::VideoOutput(int64_t handle,
     }
   });
   future.wait();
+  media_kit_video::PerformanceMetrics::Instance().IncrementActiveOutputs();
 }
 
 VideoOutput::~VideoOutput() {
   destroyed_ = true;
+  media_kit_video::PerformanceMetrics::Instance().DecrementActiveOutputs();
   auto promise = std::promise<void>();
   if (texture_id_) {
     registrar_->texture_registrar()->UnregisterTexture(
@@ -165,6 +168,8 @@ VideoOutput::~VideoOutput() {
             std::cout << "VideoOutput::~VideoOutput: "
                       << reinterpret_cast<int64_t>(handle_) << std::endl;
             std::lock_guard<std::mutex> lock(textures_mutex_);
+            media_kit_video::PerformanceMetrics::Instance()
+                .AddTextureUnregister();
             texture_variants_.clear();
             // H/W
             textures_.clear();
@@ -193,13 +198,28 @@ void VideoOutput::NotifyRender() {
     return;
   }
 
+  auto& metrics = media_kit_video::PerformanceMetrics::Instance();
+  metrics.AddRenderRequest();
+  const bool collect_metrics = metrics.enabled();
+  std::chrono::steady_clock::time_point queued_at;
+  if (collect_metrics) queued_at = std::chrono::steady_clock::now();
   render_requested_.store(true, std::memory_order_release);
   if (render_task_pending_.exchange(true, std::memory_order_acq_rel)) {
+    metrics.AddRenderRequestCoalesced();
     return;
   }
 
   try {
-    thread_pool_ref_->Post([this]() {
+    thread_pool_ref_->Post([this, collect_metrics, queued_at]() {
+      auto& metrics = media_kit_video::PerformanceMetrics::Instance();
+      metrics.AddRenderTask();
+      if (collect_metrics && metrics.enabled()) {
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - queued_at);
+        metrics.ObserveRenderQueueWait(
+            static_cast<uint64_t>(elapsed.count() < 0 ? 0 : elapsed.count()));
+      }
       render_requested_.store(false, std::memory_order_release);
       if (!destroyed_.load(std::memory_order_acquire)) {
         // Resize and render on the same worker task. This keeps the render
@@ -235,7 +255,19 @@ void VideoOutput::Render() {
             {MPV_RENDER_PARAM_D3D11_FBO, &fbo},
             {MPV_RENDER_PARAM_INVALID, nullptr},
         };
+        auto& metrics = media_kit_video::PerformanceMetrics::Instance();
+        const bool collect_metrics = metrics.enabled();
+        std::chrono::steady_clock::time_point start;
+        if (collect_metrics) start = std::chrono::steady_clock::now();
+        metrics.AddMpvRenderCall();
         mpv_render_context_render(render_context_, params);
+        if (collect_metrics) {
+          const auto elapsed = std::chrono::duration_cast<
+              std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                        start);
+          metrics.ObserveMpvRenderDuration(
+              static_cast<uint64_t>(std::max<int64_t>(0, elapsed.count())));
+        }
         frame_available = d3d11_renderer_->ProducerCommit();
       } else if (d3d11_renderer_->ShouldSkipRendering()) {
         int skip_rendering = 1;
@@ -243,7 +275,20 @@ void VideoOutput::Render() {
             {MPV_RENDER_PARAM_SKIP_RENDERING, &skip_rendering},
             {MPV_RENDER_PARAM_INVALID, nullptr},
         };
+        auto& metrics = media_kit_video::PerformanceMetrics::Instance();
+        const bool collect_metrics = metrics.enabled();
+        std::chrono::steady_clock::time_point start;
+        if (collect_metrics) start = std::chrono::steady_clock::now();
+        metrics.AddSkipRendering();
+        metrics.AddMpvRenderCall();
         mpv_render_context_render(render_context_, params);
+        if (collect_metrics) {
+          const auto elapsed = std::chrono::duration_cast<
+              std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                        start);
+          metrics.ObserveMpvRenderDuration(
+              static_cast<uint64_t>(std::max<int64_t>(0, elapsed.count())));
+        }
         frame_available = d3d11_renderer_->ProducerCommit();
       }
     }
@@ -261,14 +306,42 @@ void VideoOutput::Render() {
           {MPV_RENDER_PARAM_SW_POINTER, pixel_buffer_.get()},
           {MPV_RENDER_PARAM_INVALID, nullptr},
       };
+      auto& metrics = media_kit_video::PerformanceMetrics::Instance();
+      const bool collect_metrics = metrics.enabled();
+      std::chrono::steady_clock::time_point start;
+      if (collect_metrics) start = std::chrono::steady_clock::now();
+      metrics.AddMpvRenderCall();
       mpv_render_context_render(render_context_, params);
+      if (collect_metrics) {
+        const auto elapsed = std::chrono::duration_cast<
+            std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                      start);
+        metrics.ObserveMpvRenderDuration(
+            static_cast<uint64_t>(std::max<int64_t>(0, elapsed.count())));
+      }
       frame_available = true;
     }
-    if (!frame_available) return;
+    if (!frame_available) {
+      media_kit_video::PerformanceMetrics::Instance().AddRenderTargetMiss();
+      return;
+    }
     try {
       // Notify Flutter that a new frame is available.
+      auto& metrics = media_kit_video::PerformanceMetrics::Instance();
+      const bool collect_metrics = metrics.enabled();
+      std::chrono::steady_clock::time_point start;
+      if (collect_metrics) start = std::chrono::steady_clock::now();
       registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
+      metrics.AddFrameAvailableMark();
+      if (collect_metrics) {
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start);
+        metrics.ObserveFrameAvailableDuration(
+            static_cast<uint64_t>(elapsed.count() < 0 ? 0 : elapsed.count()));
+      }
     } catch (...) {
+      media_kit_video::PerformanceMetrics::Instance().AddFrameAvailableFailure();
       // Prevent any redundant exceptions if the texture is unregistered etc.
     }
   }
@@ -318,6 +391,7 @@ void VideoOutput::SetAnime4KEnabled(bool enabled) {
   thread_pool_ref_->Post([&, enabled]() {
     if (d3d11_renderer_ != nullptr) {
       d3d11_renderer_->SetAnime4KEnabled(enabled);
+      media_kit_video::PerformanceMetrics::Instance().SetAnime4KEnabled(enabled);
     }
   });
 }
@@ -328,6 +402,64 @@ void VideoOutput::SetGPUThreadPriority(int priority) {
       d3d11_renderer_->SetGPUThreadPriority(priority);
     }
   });
+}
+
+VideoOutputPerformanceSnapshot VideoOutput::GetPerformanceSnapshot() const {
+  VideoOutputPerformanceSnapshot snapshot;
+  if (!handle_) return snapshot;
+
+  const char* properties[] = {
+      "frame-drop-count",
+      "decoder-frame-drop-count",
+      "vo-delayed-frame-count",
+      "vo-mistimed-frame-count",
+      "display-fps",
+      "estimated-vf-fps",
+      "container-fps",
+      "speed",
+      "avsync",
+      "vsync-ratio",
+      "vsync-jitter",
+      "hwdec-current",
+      "current-vo",
+      "current-gpu-context",
+      "video-params/w",
+      "video-params/h",
+      "video-out-params/w",
+      "video-out-params/h",
+  };
+  for (const auto* property : properties) {
+    char* value = mpv_get_property_string(handle_, property);
+    if (value != nullptr) {
+      if (value[0] != '\0') {
+        snapshot.mpv_properties.emplace(property, value);
+      }
+      mpv_free(value);
+    }
+  }
+
+  if (snapshot.mpv_properties.find("frame-drop-count") ==
+      snapshot.mpv_properties.end()) {
+    char* value = mpv_get_property_string(handle_, "vo-drop-frame-count");
+    if (value != nullptr) {
+      if (value[0] != '\0') {
+        snapshot.mpv_properties.emplace("frame-drop-count", value);
+      }
+      mpv_free(value);
+    }
+  }
+  if (snapshot.mpv_properties.find("decoder-frame-drop-count") ==
+      snapshot.mpv_properties.end()) {
+    char* value =
+        mpv_get_property_string(handle_, "decoder-drop-frame-count");
+    if (value != nullptr) {
+      if (value[0] != '\0') {
+        snapshot.mpv_properties.emplace("decoder-frame-drop-count", value);
+      }
+      mpv_free(value);
+    }
+  }
+  return snapshot;
 }
 
 void VideoOutput::CheckAndResize() {
@@ -359,6 +491,7 @@ void VideoOutput::CheckAndResize() {
 
 void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
   std::cout << required_width << " " << required_height << std::endl;
+  media_kit_video::PerformanceMetrics::Instance().AddTextureResize();
   // Unregister previously registered texture & delete underlying objects.
   if (texture_id_) {
     const int64_t id = texture_id_;
@@ -377,6 +510,8 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
                       << std::endl;
             std::lock_guard<std::mutex> lock(textures_mutex_);
             if (!destroyed_) {
+              media_kit_video::PerformanceMetrics::Instance()
+                  .AddTextureUnregister();
               texture_variants_.erase(id);
               textures_.erase(id);
               pixel_buffer_textures_.erase(id);
@@ -420,21 +555,49 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
         std::make_unique<flutter::TextureVariant>(flutter::GpuSurfaceTexture(
             kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle,
             [this, texture_state](auto, auto) {
+              auto& metrics =
+                  media_kit_video::PerformanceMetrics::Instance();
+              const bool collect_metrics = metrics.enabled();
+              std::chrono::steady_clock::time_point callback_started;
+              if (collect_metrics) {
+                callback_started = std::chrono::steady_clock::now();
+              }
+              const auto finish_metrics = [&]() {
+                if (!collect_metrics) return;
+                const auto elapsed =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - callback_started);
+                metrics.ObserveFlutterTextureCallbackDuration(
+                    static_cast<uint64_t>(elapsed.count() < 0
+                                              ? 0
+                                              : elapsed.count()));
+              };
+              metrics.AddFlutterTextureCallback();
               std::lock_guard<std::mutex> lock(textures_mutex_);
               if (destroyed_ || !texture_state->renderer) {
+                finish_metrics();
                 return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
               }
               const auto handle = texture_state->renderer->ConsumerAcquire();
               if (!handle) {
+                metrics.AddTextureCallbackNoHandle();
+                finish_metrics();
                 return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
+              }
+              const auto previous = last_texture_handle_.exchange(
+                  handle, std::memory_order_acq_rel);
+              if (previous != handle) {
+                metrics.AddTextureHandleChange();
               }
               texture_state->acquired_handle = handle;
               texture_state->descriptor.handle = handle;
+              finish_metrics();
               return &texture_state->descriptor;
             }));
     // Register new texture.
     texture_id_ =
         registrar_->texture_registrar()->RegisterTexture(texture_variant.get());
+    media_kit_video::PerformanceMetrics::Instance().AddTextureRegistration();
     std::cout << "media_kit: VideoOutput: Create Texture: " << texture_id_
               << std::endl;
     std::lock_guard<std::mutex> lock(textures_mutex_);
@@ -443,6 +606,11 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
         std::make_pair(texture_id_, std::move(texture_variant)));
     // Notify public texture update callback.
     texture_update_callback_(texture_id_, required_width, required_height);
+    media_kit_video::PerformanceMetrics::Instance().SetOutputInfo(
+        static_cast<int>(d3d11_renderer_->output_mode()), true, required_width,
+        required_height, d3d11_renderer_->anime4k_enabled(),
+        configuration_.render_backend.empty() ? "gpu"
+                                              : configuration_.render_backend);
   }
   // S/W
   if (pixel_buffer_ != nullptr) {
@@ -454,16 +622,32 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
     pixel_buffer_texture->release_callback = [](void*) {};
     auto texture_variant = std::make_unique<flutter::TextureVariant>(
         flutter::PixelBufferTexture([&](auto, auto) {
-          std::lock_guard<std::mutex> lock(textures_mutex_);
-          if (texture_id_) {
-            return pixel_buffer_textures_.at(texture_id_).get();
-          } else {
-            return (FlutterDesktopPixelBuffer*)nullptr;
+          auto& metrics = media_kit_video::PerformanceMetrics::Instance();
+          const bool collect_metrics = metrics.enabled();
+          std::chrono::steady_clock::time_point callback_started;
+          if (collect_metrics) {
+            callback_started = std::chrono::steady_clock::now();
           }
+          metrics.AddFlutterTextureCallback();
+          std::lock_guard<std::mutex> lock(textures_mutex_);
+          FlutterDesktopPixelBuffer* result = nullptr;
+          if (texture_id_) {
+            result = pixel_buffer_textures_.at(texture_id_).get();
+          }
+          if (collect_metrics) {
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - callback_started);
+            metrics.ObserveFlutterTextureCallbackDuration(
+                static_cast<uint64_t>(elapsed.count() < 0 ? 0
+                                                          : elapsed.count()));
+          }
+          return result;
         }));
     // Register new texture.
     texture_id_ =
         registrar_->texture_registrar()->RegisterTexture(texture_variant.get());
+    media_kit_video::PerformanceMetrics::Instance().AddTextureRegistration();
     std::cout << "media_kit: VideoOutput: Create Texture: " << texture_id_
               << std::endl;
     std::lock_guard<std::mutex> lock(textures_mutex_);
@@ -473,6 +657,8 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
         std::make_pair(texture_id_, std::move(texture_variant)));
     // Notify public texture update callback.
     texture_update_callback_(texture_id_, required_width, required_height);
+    media_kit_video::PerformanceMetrics::Instance().SetOutputInfo(
+        3, false, required_width, required_height, false, "software");
   }
 }
 

@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "d3d11_anime4k_processor.h"
 #include "fixed_handle_texture_bridge.h"
@@ -44,6 +45,9 @@ class D3D11Renderer {
   HANDLE ConsumerAcquire();
   void ConsumerRelease(HANDLE handle);
   HANDLE ReadHandleSnapshot() const;
+  media_kit_video::VideoOutputMode output_mode() const { return output_mode_; }
+  const std::string& gpu_adapter() const { return gpu_adapter_; }
+  bool anime4k_enabled() const { return anime4k_enabled_; }
   bool UsesNonBlockingMailbox() const {
     return output_mode_ ==
            media_kit_video::VideoOutputMode::kNonBlockingMailbox;
@@ -67,6 +71,7 @@ class D3D11Renderer {
   std::unique_ptr<D3D11Anime4KProcessor> anime4k_processor_;
   media_kit_video::VideoOutputMode output_mode_ =
       media_kit_video::kDefaultVideoOutputMode;
+  std::string gpu_adapter_;
   bool anime4k_enabled_ = false;
   bool anime4k_frame_pending_ = false;
 };

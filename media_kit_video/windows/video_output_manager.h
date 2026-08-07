@@ -12,6 +12,7 @@
 #include <flutter/plugin_registrar_windows.h>
 
 #include <unordered_map>
+#include <vector>
 
 #include "thread_pool.h"
 #include "video_output.h"
@@ -48,6 +49,9 @@ class VideoOutputManager {
   // Selects the frame bridge used by video outputs created afterwards.
   // Existing outputs keep their current D3D11 resources until disposed.
   void SetVideoOutputMode(int mode);
+
+  bool TryGetPerformanceSnapshots(
+      std::vector<VideoOutputPerformanceSnapshot>* snapshots);
 
   // Destroys the |VideoOutput| with given handle.
   void Dispose(int64_t handle);
