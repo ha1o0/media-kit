@@ -95,6 +95,8 @@ class VideoOutput {
 
   void Render();
 
+  void MarkCurrentTextureFrameAvailable();
+
   void CheckAndResize();
 
   void Resize(int64_t required_width, int64_t required_height);
@@ -120,6 +122,7 @@ class VideoOutput {
   std::atomic<bool> render_requested_{false};
 
   std::mutex textures_mutex_ = std::mutex();
+  std::mutex frame_notification_mutex_ = std::mutex();
 
   std::unordered_map<int64_t, std::unique_ptr<flutter::TextureVariant>>
       texture_variants_ = {};

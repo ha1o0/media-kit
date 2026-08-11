@@ -16,7 +16,9 @@
 #include <wrl.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
 
 #include "d3d11_anime4k_processor.h"
 #include "fixed_handle_texture_bridge.h"
@@ -40,9 +42,16 @@ class D3D11Renderer {
   void SetSize(int32_t width, int32_t height);
   void SetAnime4KEnabled(bool enabled);
   void SetGPUThreadPriority(int priority);
+  // The caller keeps this lock across render_target(), mpv rendering and
+  // ProducerCommit() so Flutter's descriptor callback cannot interleave D3D11
+  // immediate-context commands with producer command submission.
+  std::unique_lock<std::mutex> AcquireRenderLock() {
+    return std::unique_lock<std::mutex>(render_mutex_);
+  }
   bool ProducerCommit();
   HANDLE ConsumerAcquire();
-  void ConsumerRelease(HANDLE handle);
+  void ConsumerHandleOpened(HANDLE handle);
+  void SetFrameAvailableCallback(std::function<void()> callback);
   HANDLE ReadHandleSnapshot() const;
   bool UsesNonBlockingMailbox() const {
     return output_mode_ ==
@@ -65,6 +74,7 @@ class D3D11Renderer {
   Microsoft::WRL::ComPtr<MailboxSwapChain> mailbox_swap_chain_;
   std::unique_ptr<FixedHandleTextureBridge> fixed_handle_bridge_;
   std::unique_ptr<D3D11Anime4KProcessor> anime4k_processor_;
+  std::mutex render_mutex_;
   media_kit_video::VideoOutputMode output_mode_ =
       media_kit_video::kDefaultVideoOutputMode;
   bool anime4k_enabled_ = false;

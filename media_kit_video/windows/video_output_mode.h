@@ -14,7 +14,7 @@ enum class VideoOutputMode : int {
 };
 
 constexpr VideoOutputMode kDefaultVideoOutputMode =
-    VideoOutputMode::kBlockingMailbox;
+    VideoOutputMode::kFixedHandleCopy;
 
 inline std::atomic<int> g_video_output_mode{
     static_cast<int>(kDefaultVideoOutputMode)};
@@ -33,6 +33,18 @@ inline VideoOutputMode NormalizeVideoOutputMode(int value) {
 
 inline VideoOutputMode GetVideoOutputMode() {
   return NormalizeVideoOutputMode(g_video_output_mode.load());
+}
+
+inline const char* VideoOutputModeName(VideoOutputMode mode) {
+  switch (mode) {
+    case VideoOutputMode::kNonBlockingMailbox:
+      return "non-blocking-mailbox-experimental";
+    case VideoOutputMode::kFixedHandleCopy:
+      return "fixed-handle-copy";
+    case VideoOutputMode::kBlockingMailbox:
+    default:
+      return "blocking-mailbox-legacy";
+  }
 }
 
 }  // namespace media_kit_video

@@ -11,6 +11,7 @@
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
+#include <utility>
 
 #include "utils.h"
 #include "gpu_thread_priority.h"
@@ -29,6 +30,9 @@ D3D11Renderer::D3D11Renderer(int32_t width,
   if (!CreateFrameBridge()) {
     throw std::runtime_error("Unable to create D3D11 frame bridge.");
   }
+  std::cout << "media_kit: D3D11Renderer: Frame bridge mode: "
+            << media_kit_video::VideoOutputModeName(output_mode_) << "."
+            << std::endl;
 }
 
 D3D11Renderer::~D3D11Renderer() {
@@ -65,6 +69,7 @@ ID3D11Texture2D* D3D11Renderer::render_target() {
 }
 
 void D3D11Renderer::SetSize(int32_t width, int32_t height) {
+  std::lock_guard<std::mutex> lock(render_mutex_);
   if (width == width_ && height == height_) return;
   width_ = width;
   height_ = height;
@@ -89,6 +94,7 @@ void D3D11Renderer::SetSize(int32_t width, int32_t height) {
 }
 
 void D3D11Renderer::SetAnime4KEnabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(render_mutex_);
   anime4k_enabled_ = enabled;
   anime4k_frame_pending_ = false;
   if (!enabled && anime4k_processor_) {
@@ -118,13 +124,22 @@ bool D3D11Renderer::ProducerCommit() {
 
 HANDLE D3D11Renderer::ConsumerAcquire() {
   if (mailbox_swap_chain_) return mailbox_swap_chain_->ConsumerAcquire();
-  return fixed_handle_bridge_ ? fixed_handle_bridge_->ConsumerAcquire()
-                              : nullptr;
+  if (!fixed_handle_bridge_) return nullptr;
+
+  std::lock_guard<std::mutex> lock(render_mutex_);
+  return fixed_handle_bridge_->ConsumerAcquire();
 }
 
-void D3D11Renderer::ConsumerRelease(HANDLE handle) {
+void D3D11Renderer::ConsumerHandleOpened(HANDLE handle) {
   if (mailbox_swap_chain_) {
-    mailbox_swap_chain_->ConsumerRelease(handle);
+    mailbox_swap_chain_->ConsumerHandleOpened(handle);
+  }
+}
+
+void D3D11Renderer::SetFrameAvailableCallback(
+    std::function<void()> callback) {
+  if (mailbox_swap_chain_) {
+    mailbox_swap_chain_->SetFrameAvailableCallback(std::move(callback));
   }
 }
 

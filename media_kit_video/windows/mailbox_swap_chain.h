@@ -16,8 +16,11 @@
 #include <wrl.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <mutex>
+#include <thread>
 
 // A small 4-slot mailbox of BGRA8 D3D11 textures shared between mpv's producer
 // thread and Flutter's GpuSurfaceTexture consumer.
@@ -85,7 +88,8 @@ class MailboxSwapChain final : public IDXGISwapChain {
   ID3D11Texture2D* RenderTarget();
   bool ProducerCommit();
   HANDLE ConsumerAcquire();
-  void ConsumerRelease(HANDLE handle);
+  void ConsumerHandleOpened(HANDLE handle);
+  void SetFrameAvailableCallback(std::function<void()> callback);
   HRESULT Resize(int32_t width, int32_t height);
 
   HANDLE ReadHandleSnapshot();
@@ -108,6 +112,11 @@ class MailboxSwapChain final : public IDXGISwapChain {
   bool PromoteCompletedFrames();
   bool TakePublishedFrame();
   void ResetNonBlockingState();
+  void StartCompletionThread();
+  void StopCompletionThread();
+  void WakeCompletionThread();
+  void CompletionLoop();
+  void NotifyFrameAvailable();
 
   enum class SlotState {
     kFree,
@@ -123,6 +132,8 @@ class MailboxSwapChain final : public IDXGISwapChain {
     Microsoft::WRL::ComPtr<ID3D11Fence> fence;
     uint64_t fence_value = 0;
     uint64_t submission_id = 0;
+    uint64_t reuse_after_opened_submission = 0;
+    bool handle_opened = false;
     SlotState state = SlotState::kFree;
   };
 
@@ -136,7 +147,17 @@ class MailboxSwapChain final : public IDXGISwapChain {
 
   std::mutex slots_mutex_;
   HANDLE fence_event_ = nullptr;
+  HANDLE completion_stop_event_ = nullptr;
   bool non_blocking_ = false;
+
+  std::mutex completion_mutex_;
+  std::condition_variable completion_cv_;
+  bool completion_work_pending_ = false;
+  bool completion_stop_ = false;
+  std::thread completion_thread_;
+
+  std::mutex callback_mutex_;
+  std::function<void()> frame_available_callback_;
 
   std::atomic<bool> has_completed_frame_{false};
   std::atomic<int> latest_completed_slot_{-1};

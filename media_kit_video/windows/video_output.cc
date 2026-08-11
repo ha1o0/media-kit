@@ -50,6 +50,8 @@ VideoOutput::VideoOutput(int64_t handle,
             static_cast<int32_t>(width_.value_or(1)),
             static_cast<int32_t>(height_.value_or(1)), flutter_adapter,
             media_kit_video::GetVideoOutputMode());
+        d3d11_renderer_->SetFrameAvailableCallback(
+            [this]() { MarkCurrentTextureFrameAvailable(); });
         mpv_d3d11_init_params d3d11_init_params{
             d3d11_renderer_->device(),
         };
@@ -151,9 +153,15 @@ VideoOutput::VideoOutput(int64_t handle,
 VideoOutput::~VideoOutput() {
   destroyed_ = true;
   auto promise = std::promise<void>();
-  if (texture_id_) {
+  int64_t texture_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(frame_notification_mutex_);
+    texture_id = texture_id_;
+    texture_id_ = 0;
+  }
+  if (texture_id) {
     registrar_->texture_registrar()->UnregisterTexture(
-        texture_id_, [&, texture_id = texture_id_]() {
+        texture_id, [&, texture_id]() {
           // Add one more task into the thread pool queue & exit the destructor
           // only when it gets executed. This will ensure that all the tasks
           // posted to the thread pool i.e. render or resize before this are
@@ -179,7 +187,6 @@ VideoOutput::~VideoOutput() {
   }
 
   promise.get_future().wait();
-  texture_id_ = 0;
 
   if (render_context_) {
     thread_pool_ref_->Post([render_context = render_context_]() {
@@ -225,6 +232,7 @@ void VideoOutput::Render() {
     bool frame_available = false;
     // H/W
     if (d3d11_renderer_ != nullptr) {
+      auto render_lock = d3d11_renderer_->AcquireRenderLock();
       mpv_d3d11_fbo fbo{
           d3d11_renderer_->render_target(),
           d3d11_renderer_->width(),
@@ -265,12 +273,19 @@ void VideoOutput::Render() {
       frame_available = true;
     }
     if (!frame_available) return;
-    try {
-      // Notify Flutter that a new frame is available.
-      registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
-    } catch (...) {
-      // Prevent any redundant exceptions if the texture is unregistered etc.
-    }
+    MarkCurrentTextureFrameAvailable();
+  }
+}
+
+void VideoOutput::MarkCurrentTextureFrameAvailable() {
+  std::lock_guard<std::mutex> lock(frame_notification_mutex_);
+  if (destroyed_.load(std::memory_order_acquire) || !texture_id_) return;
+
+  try {
+    registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
+  } catch (...) {
+    // The texture can be unregistered while an asynchronous mailbox fence is
+    // completing. Treat the notification as obsolete in that case.
   }
 }
 
@@ -360,10 +375,15 @@ void VideoOutput::CheckAndResize() {
 void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
   std::cout << required_width << " " << required_height << std::endl;
   // Unregister previously registered texture & delete underlying objects.
-  if (texture_id_) {
-    const int64_t id = texture_id_;
-    const bool wait_for_unregister =
-        d3d11_renderer_ && d3d11_renderer_->UsesNonBlockingMailbox();
+  int64_t old_texture_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(frame_notification_mutex_);
+    old_texture_id = texture_id_;
+    texture_id_ = 0;
+  }
+  if (old_texture_id) {
+    const int64_t id = old_texture_id;
+    const bool wait_for_unregister = d3d11_renderer_ != nullptr;
     auto unregister_completed =
         wait_for_unregister ? std::make_shared<std::promise<void>>() : nullptr;
     std::future<void> unregister_future;
@@ -386,7 +406,6 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
             unregister_completed->set_value();
           }
         });
-    texture_id_ = 0;
     if (unregister_completed) {
       unregister_future.wait();
     }
@@ -408,7 +427,7 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
       descriptor.release_callback = [](void* context) {
         auto* state = static_cast<GpuSurfaceTextureState*>(context);
         if (state && state->renderer && state->acquired_handle) {
-          state->renderer->ConsumerRelease(state->acquired_handle);
+          state->renderer->ConsumerHandleOpened(state->acquired_handle);
         }
       };
     } else {
@@ -433,16 +452,22 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
               return &texture_state->descriptor;
             }));
     // Register new texture.
-    texture_id_ =
+    const int64_t texture_id =
         registrar_->texture_registrar()->RegisterTexture(texture_variant.get());
-    std::cout << "media_kit: VideoOutput: Create Texture: " << texture_id_
+    std::cout << "media_kit: VideoOutput: Create Texture: " << texture_id
               << std::endl;
-    std::lock_guard<std::mutex> lock(textures_mutex_);
-    textures_.emplace(std::make_pair(texture_id_, std::move(texture)));
-    texture_variants_.emplace(
-        std::make_pair(texture_id_, std::move(texture_variant)));
+    {
+      std::lock_guard<std::mutex> lock(textures_mutex_);
+      textures_.emplace(std::make_pair(texture_id, std::move(texture)));
+      texture_variants_.emplace(
+          std::make_pair(texture_id, std::move(texture_variant)));
+    }
+    {
+      std::lock_guard<std::mutex> lock(frame_notification_mutex_);
+      texture_id_ = texture_id;
+    }
     // Notify public texture update callback.
-    texture_update_callback_(texture_id_, required_width, required_height);
+    texture_update_callback_(texture_id, required_width, required_height);
   }
   // S/W
   if (pixel_buffer_ != nullptr) {
@@ -462,17 +487,23 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
           }
         }));
     // Register new texture.
-    texture_id_ =
+    const int64_t texture_id =
         registrar_->texture_registrar()->RegisterTexture(texture_variant.get());
-    std::cout << "media_kit: VideoOutput: Create Texture: " << texture_id_
+    std::cout << "media_kit: VideoOutput: Create Texture: " << texture_id
               << std::endl;
-    std::lock_guard<std::mutex> lock(textures_mutex_);
-    pixel_buffer_textures_.emplace(
-        std::make_pair(texture_id_, std::move(pixel_buffer_texture)));
-    texture_variants_.emplace(
-        std::make_pair(texture_id_, std::move(texture_variant)));
+    {
+      std::lock_guard<std::mutex> lock(textures_mutex_);
+      pixel_buffer_textures_.emplace(
+          std::make_pair(texture_id, std::move(pixel_buffer_texture)));
+      texture_variants_.emplace(
+          std::make_pair(texture_id, std::move(texture_variant)));
+    }
+    {
+      std::lock_guard<std::mutex> lock(frame_notification_mutex_);
+      texture_id_ = texture_id;
+    }
     // Notify public texture update callback.
-    texture_update_callback_(texture_id_, required_width, required_height);
+    texture_update_callback_(texture_id, required_width, required_height);
   }
 }
 

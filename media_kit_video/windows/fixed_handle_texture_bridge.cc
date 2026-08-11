@@ -38,13 +38,34 @@ HRESULT FixedHandleTextureBridge::Create(ID3D11Device* device,
 }
 
 bool FixedHandleTextureBridge::ProducerCommit() {
-  if (!context_ || !render_texture_ || !shared_texture_) return false;
+  if (!render_texture_ || !shared_texture_) return false;
 
-  // Both operations remain on the GPU. Flush makes the copy visible to the
-  // Flutter device which imports the stable shared HANDLE.
-  context_->CopyResource(shared_texture_.Get(), render_texture_.Get());
-  context_->Flush();
+  // Flutter can coalesce multiple producer notifications. Record that a newer
+  // private frame exists and defer the full-surface copy until Flutter actually
+  // requests the descriptor.
+  produced_generation_.fetch_add(1, std::memory_order_release);
   return true;
+}
+
+HANDLE FixedHandleTextureBridge::ConsumerAcquire() {
+  const HANDLE handle = shared_handle_.load(std::memory_order_acquire);
+  if (!handle || !context_ || !render_texture_ || !shared_texture_) {
+    return nullptr;
+  }
+
+  const uint64_t produced =
+      produced_generation_.load(std::memory_order_acquire);
+  if (produced != 0 &&
+      copied_generation_.load(std::memory_order_relaxed) != produced) {
+    // The renderer serializes this operation with mpv and Anime4K command
+    // submission. Commands therefore stay ordered on the immediate context,
+    // while the stable shared texture is only updated when Flutter consumes it.
+    context_->CopyResource(shared_texture_.Get(), render_texture_.Get());
+    context_->Flush();
+    copied_generation_.store(produced, std::memory_order_release);
+  }
+
+  return handle;
 }
 
 HRESULT FixedHandleTextureBridge::Resize(int32_t width, int32_t height) {
@@ -109,6 +130,8 @@ HRESULT FixedHandleTextureBridge::AllocateTextures() {
 
 void FixedHandleTextureBridge::ReleaseTextures() {
   shared_handle_.store(nullptr, std::memory_order_release);
+  produced_generation_.store(0, std::memory_order_release);
+  copied_generation_.store(0, std::memory_order_release);
   shared_texture_.Reset();
   render_texture_.Reset();
 }

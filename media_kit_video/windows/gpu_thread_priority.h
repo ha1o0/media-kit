@@ -10,7 +10,9 @@
 
 namespace media_kit_video {
 
-constexpr int kDefaultGpuThreadPriority = 5;
+// DXGI documents 0 as normal priority. Raising only the video device can
+// starve Flutter's compositor under sustained GPU load on hybrid laptops.
+constexpr int kDefaultGpuThreadPriority = 0;
 constexpr int kMinGpuThreadPriority = -7;
 constexpr int kMaxGpuThreadPriority = 7;
 

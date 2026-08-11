@@ -11,8 +11,9 @@
 #include <atomic>
 #include <cstdint>
 
-// Renders into a private texture, then copies each submitted frame into one
-// shared texture. The shared HANDLE remains stable until the video is resized.
+// Renders into a private texture, then copies the newest unconsumed frame into
+// one shared texture when Flutter requests the descriptor. The shared HANDLE
+// remains stable until the video is resized.
 class FixedHandleTextureBridge final {
  public:
   static HRESULT Create(ID3D11Device* device,
@@ -24,10 +25,10 @@ class FixedHandleTextureBridge final {
 
   ID3D11Texture2D* RenderTarget() const { return render_texture_.Get(); }
   bool ProducerCommit();
-  HANDLE ConsumerAcquire() const {
+  HANDLE ConsumerAcquire();
+  HANDLE ReadHandleSnapshot() const {
     return shared_handle_.load(std::memory_order_acquire);
   }
-  HANDLE ReadHandleSnapshot() const { return ConsumerAcquire(); }
   HRESULT Resize(int32_t width, int32_t height);
 
  private:
@@ -43,6 +44,8 @@ class FixedHandleTextureBridge final {
   Microsoft::WRL::ComPtr<ID3D11Texture2D> render_texture_;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_texture_;
   std::atomic<HANDLE> shared_handle_{nullptr};
+  std::atomic<uint64_t> produced_generation_{0};
+  std::atomic<uint64_t> copied_generation_{0};
   int32_t width_ = 1;
   int32_t height_ = 1;
 };
