@@ -21,13 +21,13 @@ inline std::atomic<int> g_video_output_mode{
 
 inline VideoOutputMode NormalizeVideoOutputMode(int value) {
   switch (value) {
+    case static_cast<int>(VideoOutputMode::kBlockingMailbox):
+      return VideoOutputMode::kBlockingMailbox;
     case static_cast<int>(VideoOutputMode::kNonBlockingMailbox):
       return VideoOutputMode::kNonBlockingMailbox;
     case static_cast<int>(VideoOutputMode::kFixedHandleCopy):
-      return VideoOutputMode::kFixedHandleCopy;
-    case static_cast<int>(VideoOutputMode::kBlockingMailbox):
     default:
-      return VideoOutputMode::kBlockingMailbox;
+      return VideoOutputMode::kFixedHandleCopy;
   }
 }
 
