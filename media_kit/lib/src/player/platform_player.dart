@@ -519,6 +519,13 @@ class PlayerConfiguration {
   /// Learn more: https://ffmpeg.org/ffmpeg-protocols.html#Protocol-Options
   final List<String> protocolWhitelist;
 
+  /// Optional libmpv property overrides applied after media-kit's native
+  /// defaults during player initialization.
+  ///
+  /// These values only affect the native backend. Unknown or unsupported
+  /// properties are handled by libmpv in the same way as other properties.
+  final Map<String, String> propertyOverrides;
+
   /// Whether [Player] should let mpv configure and activate the global
   /// `AVAudioSession` on iOS.
   ///
@@ -562,6 +569,7 @@ class PlayerConfiguration {
       'https',
       'crypto',
     ],
+    this.propertyOverrides = const {},
     this.iosManageAudioSession = true,
   });
 }

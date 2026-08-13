@@ -2510,6 +2510,10 @@ class NativePlayer extends PlatformPlayer {
         },
       );
 
+      // Embedders may override media-kit's conservative defaults (for
+      // example, video scaling filters) without racing player startup.
+      properties.addAll(configuration.propertyOverrides);
+
       if (test) {
         properties['vo'] = 'null';
         properties['ao'] = 'null';
