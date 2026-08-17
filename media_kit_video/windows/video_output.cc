@@ -19,6 +19,12 @@
 #define SW_RENDERING_PIXEL_BUFFER_SIZE \
   (SW_RENDERING_MAX_WIDTH) * (SW_RENDERING_MAX_HEIGHT) * (4)
 
+#if defined(FLUTTER_WINDOWS_GPU_SURFACE_DESCRIPTOR_HAS_TEXTURE_RELEASE_CALLBACK)
+constexpr bool kUseMailboxConsumerLeases = true;
+#else
+constexpr bool kUseMailboxConsumerLeases = false;
+#endif
+
 VideoOutput::VideoOutput(int64_t handle,
                          VideoOutputConfiguration configuration,
                          flutter::PluginRegistrarWindows* registrar,
@@ -49,7 +55,7 @@ VideoOutput::VideoOutput(int64_t handle,
         d3d11_renderer_ = std::make_unique<D3D11Renderer>(
             static_cast<int32_t>(width_.value_or(1)),
             static_cast<int32_t>(height_.value_or(1)), flutter_adapter,
-            media_kit_video::GetVideoOutputMode());
+            media_kit_video::GetVideoOutputMode(), kUseMailboxConsumerLeases);
         d3d11_renderer_->SetFrameAvailableCallback(
             [this]() { MarkCurrentTextureFrameAvailable(); });
         mpv_d3d11_init_params d3d11_init_params{
@@ -80,13 +86,11 @@ VideoOutput::VideoOutput(int64_t handle,
           std::cout << "media_kit: VideoOutput: Falling back to default mpv "
                        "render backend."
                     << std::endl;
-          status =
-              mpv_render_context_create(&render_context_, handle_, params);
+          status = mpv_render_context_create(&render_context_, handle_, params);
         } else if (status != 0 && !configuration_.render_backend.empty()) {
           std::cout << "media_kit: VideoOutput: Requested mpv render backend "
-                    << configuration_.render_backend
-                    << " failed with status " << status
-                    << "; not falling back to default gpu backend."
+                    << configuration_.render_backend << " failed with status "
+                    << status << "; not falling back to default gpu backend."
                     << std::endl;
         }
         if (status == 0) {
@@ -272,14 +276,16 @@ void VideoOutput::Render() {
       mpv_render_context_render(render_context_, params);
       frame_available = true;
     }
-    if (!frame_available) return;
+    if (!frame_available)
+      return;
     MarkCurrentTextureFrameAvailable();
   }
 }
 
 void VideoOutput::MarkCurrentTextureFrameAvailable() {
   std::lock_guard<std::mutex> lock(frame_notification_mutex_);
-  if (destroyed_.load(std::memory_order_acquire) || !texture_id_) return;
+  if (destroyed_.load(std::memory_order_acquire) || !texture_id_)
+    return;
 
   try {
     registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
@@ -423,6 +429,11 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
     descriptor.width = descriptor.visible_width = d3d11_renderer_->width();
     descriptor.height = descriptor.visible_height = d3d11_renderer_->height();
     if (d3d11_renderer_->UsesNonBlockingMailbox()) {
+#if defined(FLUTTER_WINDOWS_GPU_SURFACE_DESCRIPTOR_HAS_TEXTURE_RELEASE_CALLBACK)
+      descriptor.surface_cache_size = 4;
+      descriptor.texture_release_callback =
+          &D3D11Renderer::ReleaseConsumerLease;
+#else
       descriptor.release_context = texture_state;
       descriptor.release_callback = [](void* context) {
         auto* state = static_cast<GpuSurfaceTextureState*>(context);
@@ -430,6 +441,7 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
           state->renderer->ConsumerHandleOpened(state->acquired_handle);
         }
       };
+#endif
     } else {
       descriptor.release_context = nullptr;
       descriptor.release_callback = nullptr;
@@ -443,6 +455,17 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
               if (destroyed_ || !texture_state->renderer) {
                 return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
               }
+#if defined(FLUTTER_WINDOWS_GPU_SURFACE_DESCRIPTOR_HAS_TEXTURE_RELEASE_CALLBACK)
+              if (texture_state->renderer->UsesNonBlockingMailbox()) {
+                auto* lease = texture_state->renderer->ConsumerAcquireLease();
+                if (!lease) {
+                  return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
+                }
+                texture_state->descriptor.handle = lease->handle;
+                texture_state->descriptor.texture_release_context = lease;
+                return &texture_state->descriptor;
+              }
+#endif
               const auto handle = texture_state->renderer->ConsumerAcquire();
               if (!handle) {
                 return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;

@@ -19,7 +19,8 @@ namespace {
 constexpr uint64_t kFenceDeviceRemovedValue = ~uint64_t{0};
 
 bool IsFenceComplete(ID3D11Fence* fence, uint64_t value) {
-  if (!fence) return false;
+  if (!fence)
+    return false;
   const uint64_t completed = fence->GetCompletedValue();
   return completed != kFenceDeviceRemovedValue && completed >= value;
 }
@@ -40,19 +41,23 @@ MailboxSwapChain::~MailboxSwapChain() {
 }
 
 HRESULT MailboxSwapChain::Create(ID3D11Device* device,
-                                  int32_t width,
-                                  int32_t height,
-                                  bool non_blocking,
-                                  MailboxSwapChain** out) {
-  if (!device || !out) return E_INVALIDARG;
+                                 int32_t width,
+                                 int32_t height,
+                                 bool non_blocking,
+                                 bool use_consumer_leases,
+                                 MailboxSwapChain** out) {
+  if (!device || !out)
+    return E_INVALIDARG;
 
   auto* p = new (std::nothrow) MailboxSwapChain();
-  if (!p) return E_OUTOFMEMORY;
+  if (!p)
+    return E_OUTOFMEMORY;
 
   p->device_ = device;
   p->width_ = width > 0 ? width : 1;
   p->height_ = height > 0 ? height : 1;
   p->non_blocking_ = non_blocking;
+  p->use_consumer_leases_ = non_blocking && use_consumer_leases;
   if (non_blocking) {
     p->ResetNonBlockingState();
   }
@@ -104,8 +109,9 @@ HRESULT MailboxSwapChain::Create(ID3D11Device* device,
 }
 
 HRESULT STDMETHODCALLTYPE MailboxSwapChain::QueryInterface(REFIID riid,
-                                                            void** ppv) {
-  if (!ppv) return E_POINTER;
+                                                           void** ppv) {
+  if (!ppv)
+    return E_POINTER;
 
   if (riid == __uuidof(IUnknown) || riid == __uuidof(IDXGIObject) ||
       riid == __uuidof(IDXGIDeviceSubObject) ||
@@ -125,30 +131,35 @@ ULONG STDMETHODCALLTYPE MailboxSwapChain::AddRef() {
 
 ULONG STDMETHODCALLTYPE MailboxSwapChain::Release() {
   const ULONG prev = ref_count_.fetch_sub(1u, std::memory_order_acq_rel);
-  if (prev == 1u) delete this;
+  if (prev == 1u)
+    delete this;
   return prev - 1u;
 }
 
 HRESULT STDMETHODCALLTYPE MailboxSwapChain::GetBuffer(UINT Buffer,
-                                                       REFIID riid,
-                                                       void** ppSurface) {
-  if (!ppSurface) return E_POINTER;
-  if (Buffer != 0) return DXGI_ERROR_INVALID_CALL;
-  if (riid != __uuidof(ID3D11Texture2D) &&
-      riid != __uuidof(ID3D11Resource)) {
+                                                      REFIID riid,
+                                                      void** ppSurface) {
+  if (!ppSurface)
+    return E_POINTER;
+  if (Buffer != 0)
+    return DXGI_ERROR_INVALID_CALL;
+  if (riid != __uuidof(ID3D11Texture2D) && riid != __uuidof(ID3D11Resource)) {
     return E_NOINTERFACE;
   }
 
   ID3D11Texture2D* tex = RenderTarget();
-  if (!tex) return E_FAIL;
+  if (!tex)
+    return E_FAIL;
 
   tex->AddRef();
   *ppSurface = tex;
   return S_OK;
 }
 
-HRESULT STDMETHODCALLTYPE MailboxSwapChain::GetDesc(DXGI_SWAP_CHAIN_DESC* desc) {
-  if (!desc) return E_POINTER;
+HRESULT STDMETHODCALLTYPE
+MailboxSwapChain::GetDesc(DXGI_SWAP_CHAIN_DESC* desc) {
+  if (!desc)
+    return E_POINTER;
   *desc = {};
   desc->BufferDesc.Width = static_cast<UINT>(width_);
   desc->BufferDesc.Height = static_cast<UINT>(height_);
@@ -193,7 +204,8 @@ bool MailboxSwapChain::ProducerCommit() {
     }
 
     auto& slot = slots_[submitted_slot];
-    if (!slot.fence) return false;
+    if (!slot.fence)
+      return false;
 
     const HRESULT signal_hr =
         context4_->Signal(slot.fence.Get(), ++slot.fence_value);
@@ -230,16 +242,56 @@ bool MailboxSwapChain::ProducerCommit() {
 
 HANDLE MailboxSwapChain::ConsumerAcquire() {
   std::lock_guard<std::mutex> lock(slots_mutex_);
-  if (!has_completed_frame_.load(std::memory_order_acquire)) return nullptr;
+  if (!has_completed_frame_.load(std::memory_order_acquire))
+    return nullptr;
 
   const int slot = latest_completed_slot_.load(std::memory_order_acquire);
-  if (slot < 0) return nullptr;
+  if (slot < 0)
+    return nullptr;
 
   return slots_[slot].shared_handle;
 }
 
+bool MailboxSwapChain::ConsumerAcquireFrame(ConsumerFrame* frame) {
+  if (!frame || !use_consumer_leases_)
+    return false;
+
+  std::lock_guard<std::mutex> lock(slots_mutex_);
+  if (!has_completed_frame_.load(std::memory_order_acquire))
+    return false;
+
+  const int slot = latest_completed_slot_.load(std::memory_order_acquire);
+  if (slot < 0 || slot >= 4 || slots_[slot].state != SlotState::kPublished) {
+    return false;
+  }
+
+  auto& acquired = slots_[slot];
+  acquired.state = SlotState::kAcquired;
+  frame->handle = acquired.shared_handle;
+  frame->slot = slot;
+  frame->submission_id = acquired.submission_id;
+  frame->texture = acquired.texture;
+  latest_completed_slot_.store(-1, std::memory_order_release);
+  has_completed_frame_.store(false, std::memory_order_release);
+  return true;
+}
+
+void MailboxSwapChain::ConsumerReleaseFrame(int slot, uint64_t submission_id) {
+  if (!use_consumer_leases_ || slot < 0 || slot >= 4 || submission_id == 0) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(slots_mutex_);
+  auto& released = slots_[slot];
+  if (released.state == SlotState::kAcquired &&
+      released.submission_id == submission_id) {
+    released.state = SlotState::kFree;
+  }
+}
+
 void MailboxSwapChain::ConsumerHandleOpened(HANDLE handle) {
-  if (!non_blocking_ || !handle) return;
+  if (!non_blocking_ || use_consumer_leases_ || !handle)
+    return;
 
   std::lock_guard<std::mutex> lock(slots_mutex_);
   uint64_t opened_submission = 0;
@@ -249,7 +301,8 @@ void MailboxSwapChain::ConsumerHandleOpened(HANDLE handle) {
       break;
     }
   }
-  if (opened_submission == 0) return;
+  if (opened_submission == 0)
+    return;
 
   // Flutter invokes the descriptor release callback after opening |handle|.
   // Opening this submission releases the previously bound EGL image. Keep two
@@ -270,18 +323,26 @@ void MailboxSwapChain::SetFrameAvailableCallback(
   frame_available_callback_ = std::move(callback);
 }
 
+void MailboxSwapChain::Shutdown() {
+  SetFrameAvailableCallback({});
+  StopCompletionThread();
+}
+
 HANDLE MailboxSwapChain::ReadHandleSnapshot() {
   std::lock_guard<std::mutex> lock(slots_mutex_);
-  if (!has_completed_frame_.load(std::memory_order_acquire)) return nullptr;
+  if (!has_completed_frame_.load(std::memory_order_acquire))
+    return nullptr;
 
   const int slot = latest_completed_slot_.load(std::memory_order_acquire);
-  if (slot < 0) return nullptr;
+  if (slot < 0)
+    return nullptr;
 
   return slots_[slot].shared_handle;
 }
 
 HRESULT MailboxSwapChain::Resize(int32_t width, int32_t height) {
-  if (non_blocking_) StopCompletionThread();
+  if (non_blocking_)
+    StopCompletionThread();
 
   HRESULT hr = S_OK;
   {
@@ -338,18 +399,22 @@ HRESULT MailboxSwapChain::AllocateSlots() {
 
   for (int i = 0; i < 4; ++i) {
     hr = device_->CreateTexture2D(&desc, nullptr, &slots_[i].texture);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr))
+      return hr;
 
     Microsoft::WRL::ComPtr<IDXGIResource> resource;
     hr = slots_[i].texture.As(&resource);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr))
+      return hr;
 
     hr = resource->GetSharedHandle(&slots_[i].shared_handle);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr))
+      return hr;
 
     hr = device5->CreateFence(0, D3D11_FENCE_FLAG_NONE,
                               IID_PPV_ARGS(slots_[i].fence.GetAddressOf()));
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr))
+      return hr;
     slots_[i].fence_value = 0;
   }
 
@@ -389,10 +454,12 @@ ID3D11Texture2D* MailboxSwapChain::RenderTargetNonBlocking() {
   }
 
   PromoteCompletedFrames();
-  for (auto& slot : slots_) {
-    if (slot.state == SlotState::kRetired && slot.handle_opened) {
-      slot.state = SlotState::kFree;
-      slot.handle_opened = false;
+  if (!use_consumer_leases_) {
+    for (auto& slot : slots_) {
+      if (slot.state == SlotState::kRetired && slot.handle_opened) {
+        slot.state = SlotState::kFree;
+        slot.handle_opened = false;
+      }
     }
   }
   for (int slot = 0; slot < 4; ++slot) {
@@ -416,23 +483,28 @@ bool MailboxSwapChain::PromoteCompletedFrames() {
         !IsFenceComplete(candidate.fence.Get(), candidate.fence_value)) {
       continue;
     }
-    if (newest_completed < 0 ||
-        candidate.submission_id > newest_submission) {
+    if (newest_completed < 0 || candidate.submission_id > newest_submission) {
       newest_completed = slot;
       newest_submission = candidate.submission_id;
     }
   }
 
-  if (newest_completed < 0) return false;
+  if (newest_completed < 0)
+    return false;
 
   const int previously_published =
       latest_completed_slot_.load(std::memory_order_acquire);
   if (previously_published >= 0 && previously_published != newest_completed &&
       slots_[previously_published].state == SlotState::kPublished) {
-    slots_[previously_published].state = SlotState::kRetired;
-    slots_[previously_published].handle_opened = false;
-    slots_[previously_published].reuse_after_opened_submission =
-        slots_[previously_published].submission_id + 2;
+    auto& previous = slots_[previously_published];
+    if (use_consumer_leases_) {
+      // This published frame was superseded before Flutter acquired it.
+      previous.state = SlotState::kFree;
+    } else {
+      previous.state = SlotState::kRetired;
+      previous.handle_opened = false;
+      previous.reuse_after_opened_submission = previous.submission_id + 2;
+    }
   }
 
   for (int slot = 0; slot < 4; ++slot) {
@@ -457,7 +529,6 @@ bool MailboxSwapChain::TakePublishedFrame() {
 }
 
 void MailboxSwapChain::ResetNonBlockingState() {
-  next_submission_id_ = 0;
   published_frame_pending_ = false;
   write_slot_ = -1;
   // A newly allocated texture is not a frame. Keep every handle unpublished
@@ -485,7 +556,8 @@ void MailboxSwapChain::StartCompletionThread() {
 }
 
 void MailboxSwapChain::StopCompletionThread() {
-  if (!completion_thread_.joinable()) return;
+  if (!completion_thread_.joinable())
+    return;
 
   {
     std::lock_guard<std::mutex> lock(completion_mutex_);
@@ -500,7 +572,8 @@ void MailboxSwapChain::StopCompletionThread() {
 }
 
 void MailboxSwapChain::WakeCompletionThread() {
-  if (!non_blocking_) return;
+  if (!non_blocking_)
+    return;
   {
     std::lock_guard<std::mutex> lock(completion_mutex_);
     completion_work_pending_ = true;
@@ -515,15 +588,15 @@ void MailboxSwapChain::CompletionLoop() {
       completion_cv_.wait(lock, [this]() {
         return completion_stop_ || completion_work_pending_;
       });
-      if (completion_stop_) return;
+      if (completion_stop_)
+        return;
       completion_work_pending_ = false;
     }
 
     for (;;) {
       Microsoft::WRL::ComPtr<ID3D11Fence> pending_fence;
       uint64_t pending_value = 0;
-      uint64_t oldest_submission =
-          (std::numeric_limits<uint64_t>::max)();
+      uint64_t oldest_submission = (std::numeric_limits<uint64_t>::max)();
       bool frame_ready = false;
 
       {
@@ -544,20 +617,21 @@ void MailboxSwapChain::CompletionLoop() {
       if (frame_ready) {
         NotifyFrameAvailable();
       }
-      if (!pending_fence) break;
+      if (!pending_fence)
+        break;
       const uint64_t completed = pending_fence->GetCompletedValue();
       if (completed == kFenceDeviceRemovedValue) {
         const HRESULT removed_reason = device_->GetDeviceRemovedReason();
         std::cout << "media_kit: MailboxSwapChain: device removed while "
                      "waiting for a mailbox fence (hr=0x"
-                  << std::hex << removed_reason << std::dec << ")"
-                  << std::endl;
+                  << std::hex << removed_reason << std::dec << ")" << std::endl;
         break;
       }
-      if (completed >= pending_value) continue;
+      if (completed >= pending_value)
+        continue;
 
-      const HRESULT hr = pending_fence->SetEventOnCompletion(
-          pending_value, fence_event_);
+      const HRESULT hr =
+          pending_fence->SetEventOnCompletion(pending_value, fence_event_);
       if (FAILED(hr)) {
         std::cout << "media_kit: MailboxSwapChain: SetEventOnCompletion "
                      "failed (hr=0x"
@@ -568,7 +642,8 @@ void MailboxSwapChain::CompletionLoop() {
       HANDLE wait_handles[] = {completion_stop_event_, fence_event_};
       const DWORD wait =
           ::WaitForMultipleObjects(2, wait_handles, FALSE, INFINITE);
-      if (wait == WAIT_OBJECT_0) return;
+      if (wait == WAIT_OBJECT_0)
+        return;
       if (wait != WAIT_OBJECT_0 + 1) {
         std::cout << "media_kit: MailboxSwapChain: fence wait failed (error="
                   << ::GetLastError() << ")" << std::endl;
@@ -584,21 +659,25 @@ void MailboxSwapChain::NotifyFrameAvailable() {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     callback = frame_available_callback_;
   }
-  if (callback) callback();
+  if (callback)
+    callback();
 }
 
 HRESULT MailboxSwapChain::WaitForSlot(int slot) {
-  if (slot < 0 || slot >= 4) return E_INVALIDARG;
+  if (slot < 0 || slot >= 4)
+    return E_INVALIDARG;
 
   auto& texture_slot = slots_[slot];
-  if (!texture_slot.fence || texture_slot.fence_value == 0) return E_FAIL;
+  if (!texture_slot.fence || texture_slot.fence_value == 0)
+    return E_FAIL;
   if (IsFenceComplete(texture_slot.fence.Get(), texture_slot.fence_value)) {
     return S_OK;
   }
 
   HRESULT hr = texture_slot.fence->SetEventOnCompletion(
       texture_slot.fence_value, fence_event_);
-  if (FAILED(hr)) return hr;
+  if (FAILED(hr))
+    return hr;
 
   constexpr DWORD kFenceWaitTimeoutMs = 2000;
   const ULONGLONG start = ::GetTickCount64();
@@ -606,24 +685,26 @@ HRESULT MailboxSwapChain::WaitForSlot(int slot) {
     const uint64_t completed = texture_slot.fence->GetCompletedValue();
     if (completed == kFenceDeviceRemovedValue) {
       const HRESULT removed_reason = device_->GetDeviceRemovedReason();
-      return FAILED(removed_reason) ? removed_reason : DXGI_ERROR_DEVICE_REMOVED;
+      return FAILED(removed_reason) ? removed_reason
+                                    : DXGI_ERROR_DEVICE_REMOVED;
     }
     if (completed >= texture_slot.fence_value) {
       return S_OK;
     }
 
     const ULONGLONG elapsed = ::GetTickCount64() - start;
-    if (elapsed >= kFenceWaitTimeoutMs) break;
+    if (elapsed >= kFenceWaitTimeoutMs)
+      break;
 
-    const DWORD remaining =
-        kFenceWaitTimeoutMs - static_cast<DWORD>(elapsed);
+    const DWORD remaining = kFenceWaitTimeoutMs - static_cast<DWORD>(elapsed);
     const DWORD wait = ::WaitForSingleObject(fence_event_, remaining);
     if (wait == WAIT_OBJECT_0) {
       // A timed-out wait for an older slot can signal this shared event later.
       // Treat the event only as a wake-up and verify this slot's fence above.
       continue;
     }
-    if (wait == WAIT_TIMEOUT) break;
+    if (wait == WAIT_TIMEOUT)
+      break;
     return HRESULT_FROM_WIN32(::GetLastError());
   }
 

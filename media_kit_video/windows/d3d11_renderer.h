@@ -27,6 +27,14 @@
 
 class D3D11Renderer {
  public:
+  struct ConsumerLease {
+    HANDLE handle = nullptr;
+    int slot = -1;
+    uint64_t submission_id = 0;
+    Microsoft::WRL::ComPtr<MailboxSwapChain> mailbox;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+  };
+
   int32_t width() const { return width_; }
   int32_t height() const { return height_; }
 
@@ -36,7 +44,8 @@ class D3D11Renderer {
   explicit D3D11Renderer(int32_t width,
                          int32_t height,
                          IDXGIAdapter* flutter_adapter,
-                         media_kit_video::VideoOutputMode output_mode);
+                         media_kit_video::VideoOutputMode output_mode,
+                         bool use_consumer_leases);
   ~D3D11Renderer();
 
   void SetSize(int32_t width, int32_t height);
@@ -50,6 +59,8 @@ class D3D11Renderer {
   }
   bool ProducerCommit();
   HANDLE ConsumerAcquire();
+  ConsumerLease* ConsumerAcquireLease();
+  static void ReleaseConsumerLease(void* context);
   void ConsumerHandleOpened(HANDLE handle);
   void SetFrameAvailableCallback(std::function<void()> callback);
   HANDLE ReadHandleSnapshot() const;
@@ -57,9 +68,7 @@ class D3D11Renderer {
     return output_mode_ ==
            media_kit_video::VideoOutputMode::kNonBlockingMailbox;
   }
-  bool ShouldSkipRendering() const {
-    return UsesNonBlockingMailbox();
-  }
+  bool ShouldSkipRendering() const { return UsesNonBlockingMailbox(); }
 
  private:
   bool CreateD3D11Device(IDXGIAdapter* flutter_adapter);
@@ -77,6 +86,7 @@ class D3D11Renderer {
   std::mutex render_mutex_;
   media_kit_video::VideoOutputMode output_mode_ =
       media_kit_video::kDefaultVideoOutputMode;
+  bool use_consumer_leases_ = false;
   bool anime4k_enabled_ = false;
   bool anime4k_frame_pending_ = false;
 };

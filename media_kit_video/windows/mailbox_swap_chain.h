@@ -30,14 +30,22 @@ class MailboxSwapChain final : public IDXGISwapChain {
                         int32_t width,
                         int32_t height,
                         bool non_blocking,
+                        bool use_consumer_leases,
                         MailboxSwapChain** out);
 
-  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,
-                                           void** ppv) override;
+  struct ConsumerFrame {
+    HANDLE handle = nullptr;
+    int slot = -1;
+    uint64_t submission_id = 0;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+  };
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override;
   ULONG STDMETHODCALLTYPE AddRef() override;
   ULONG STDMETHODCALLTYPE Release() override;
 
-  HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT,
+  HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID,
+                                           UINT,
                                            const void*) override {
     return E_NOTIMPL;
   }
@@ -59,16 +67,14 @@ class MailboxSwapChain final : public IDXGISwapChain {
                                       REFIID riid,
                                       void** ppSurface) override;
   HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC* pDesc) override;
-  HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL,
-                                               IDXGIOutput*) override {
+  HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL, IDXGIOutput*) override {
     return E_NOTIMPL;
   }
-  HRESULT STDMETHODCALLTYPE GetFullscreenState(BOOL*,
-                                               IDXGIOutput**) override {
+  HRESULT STDMETHODCALLTYPE GetFullscreenState(BOOL*, IDXGIOutput**) override {
     return E_NOTIMPL;
   }
-  HRESULT STDMETHODCALLTYPE ResizeBuffers(UINT, UINT, UINT, DXGI_FORMAT,
-                                          UINT) override {
+  HRESULT STDMETHODCALLTYPE
+  ResizeBuffers(UINT, UINT, UINT, DXGI_FORMAT, UINT) override {
     return E_NOTIMPL;
   }
   HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC*) override {
@@ -77,8 +83,8 @@ class MailboxSwapChain final : public IDXGISwapChain {
   HRESULT STDMETHODCALLTYPE GetContainingOutput(IDXGIOutput**) override {
     return E_NOTIMPL;
   }
-  HRESULT STDMETHODCALLTYPE GetFrameStatistics(
-      DXGI_FRAME_STATISTICS*) override {
+  HRESULT STDMETHODCALLTYPE
+  GetFrameStatistics(DXGI_FRAME_STATISTICS*) override {
     return E_NOTIMPL;
   }
   HRESULT STDMETHODCALLTYPE GetLastPresentCount(UINT*) override {
@@ -88,8 +94,11 @@ class MailboxSwapChain final : public IDXGISwapChain {
   ID3D11Texture2D* RenderTarget();
   bool ProducerCommit();
   HANDLE ConsumerAcquire();
+  bool ConsumerAcquireFrame(ConsumerFrame* frame);
+  void ConsumerReleaseFrame(int slot, uint64_t submission_id);
   void ConsumerHandleOpened(HANDLE handle);
   void SetFrameAvailableCallback(std::function<void()> callback);
+  void Shutdown();
   HRESULT Resize(int32_t width, int32_t height);
 
   HANDLE ReadHandleSnapshot();
@@ -123,6 +132,7 @@ class MailboxSwapChain final : public IDXGISwapChain {
     kWriting,
     kPending,
     kPublished,
+    kAcquired,
     kRetired,
   };
 
@@ -149,6 +159,7 @@ class MailboxSwapChain final : public IDXGISwapChain {
   HANDLE fence_event_ = nullptr;
   HANDLE completion_stop_event_ = nullptr;
   bool non_blocking_ = false;
+  bool use_consumer_leases_ = false;
 
   std::mutex completion_mutex_;
   std::condition_variable completion_cv_;
