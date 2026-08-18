@@ -10,7 +10,8 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
-import 'package:media_kit_video/media_kit_video_controls/src/controls/methods/video_state.dart';
+import 'package:media_kit_video/media_kit_video_controls/src/controls/methods/fullscreen.dart'
+    as fullscreen_methods;
 import 'package:media_kit_video/media_kit_video_controls/src/controls/extensions/duration.dart';
 import 'package:media_kit_video/media_kit_video_controls/src/controls/widgets/video_controls_theme_data_injector.dart';
 
@@ -20,9 +21,190 @@ import 'package:media_kit_video/media_kit_video_controls/src/controls/widgets/vi
 ///
 /// {@endtemplate}
 Widget MaterialDesktopVideoControls(VideoState state) {
-  return const VideoControlsThemeDataInjector(
-    child: _MaterialDesktopVideoControls(),
+  return MaterialDesktopVideoControlsWithAdapter(
+    _MediaKitMaterialDesktopVideoControlsAdapter(state),
   );
+}
+
+/// Backend-neutral state and commands consumed by the desktop control skin.
+///
+/// The legacy [MaterialDesktopVideoControls] entry point adapts media-kit to
+/// this interface. Applications with their own playback abstraction can use
+/// [MaterialDesktopVideoControlsWithAdapter] without depending on [VideoState].
+abstract class MaterialDesktopVideoControlsAdapter {
+  int get playlistLength;
+  bool get buffering;
+  bool get playing;
+  Duration get position;
+  Duration get duration;
+  Duration get buffer;
+  double get volume;
+  FocusNode? get focusNode;
+  EdgeInsets get subtitlePadding;
+
+  Stream<int> get playlistLengthStream;
+  Stream<bool> get bufferingStream;
+  Stream<bool> get playingStream;
+  Stream<bool> get completedStream;
+  Stream<Duration> get positionStream;
+  Stream<Duration> get durationStream;
+  Stream<Duration> get bufferStream;
+  Stream<double> get volumeStream;
+
+  Future<void> play();
+  Future<void> pause();
+  Future<void> playOrPause();
+  Future<void> next();
+  Future<void> previous();
+  Future<void> seek(Duration position);
+  Future<void> setVolume(double volume);
+  Future<String?> getNativeProperty(String name);
+
+  void setSubtitlePadding(EdgeInsets padding);
+  bool isFullscreen(BuildContext context);
+  Future<void> toggleFullscreen(BuildContext context);
+  Future<void> exitFullscreen(BuildContext context);
+}
+
+Widget MaterialDesktopVideoControlsWithAdapter(
+  MaterialDesktopVideoControlsAdapter adapter,
+) {
+  return MaterialDesktopVideoControlsAdapterScope(
+    adapter: adapter,
+    child: const VideoControlsThemeDataInjector(
+      child: _MaterialDesktopVideoControls(),
+    ),
+  );
+}
+
+class MaterialDesktopVideoControlsAdapterScope extends InheritedWidget {
+  final MaterialDesktopVideoControlsAdapter adapter;
+
+  const MaterialDesktopVideoControlsAdapterScope({
+    super.key,
+    required this.adapter,
+    required super.child,
+  });
+
+  static MaterialDesktopVideoControlsAdapter of(BuildContext context) {
+    final scope = context.dependOnInheritedWidgetOfExactType<
+        MaterialDesktopVideoControlsAdapterScope>();
+    assert(scope != null, 'No desktop video controls adapter found.');
+    return scope!.adapter;
+  }
+
+  @override
+  bool updateShouldNotify(MaterialDesktopVideoControlsAdapterScope oldWidget) =>
+      !identical(adapter, oldWidget.adapter);
+}
+
+MaterialDesktopVideoControlsAdapter _adapter(BuildContext context) =>
+    MaterialDesktopVideoControlsAdapterScope.of(context);
+
+class _MediaKitMaterialDesktopVideoControlsAdapter
+    implements MaterialDesktopVideoControlsAdapter {
+  final VideoState state;
+
+  const _MediaKitMaterialDesktopVideoControlsAdapter(this.state);
+
+  VideoController get _controller => state.widget.controller;
+
+  @override
+  int get playlistLength => _controller.player.state.playlist.medias.length;
+
+  @override
+  bool get buffering => _controller.player.state.buffering;
+
+  @override
+  bool get playing => _controller.player.state.playing;
+
+  @override
+  Duration get position => _controller.player.state.position;
+
+  @override
+  Duration get duration => _controller.player.state.duration;
+
+  @override
+  Duration get buffer => _controller.player.state.buffer;
+
+  @override
+  double get volume => _controller.player.state.volume;
+
+  @override
+  FocusNode? get focusNode => state.videoViewParametersNotifier.value.focusNode;
+
+  @override
+  EdgeInsets get subtitlePadding =>
+      state.widget.subtitleViewConfiguration.padding;
+
+  @override
+  Stream<int> get playlistLengthStream =>
+      _controller.player.stream.playlist.map((event) => event.medias.length);
+
+  @override
+  Stream<bool> get bufferingStream => _controller.player.stream.buffering;
+
+  @override
+  Stream<bool> get playingStream => _controller.player.stream.playing;
+
+  @override
+  Stream<bool> get completedStream => _controller.player.stream.completed;
+
+  @override
+  Stream<Duration> get positionStream => _controller.player.stream.position;
+
+  @override
+  Stream<Duration> get durationStream => _controller.player.stream.duration;
+
+  @override
+  Stream<Duration> get bufferStream => _controller.player.stream.buffer;
+
+  @override
+  Stream<double> get volumeStream => _controller.player.stream.volume;
+
+  @override
+  Future<void> play() => _controller.player.play();
+
+  @override
+  Future<void> pause() => _controller.player.pause();
+
+  @override
+  Future<void> playOrPause() => _controller.player.playOrPause();
+
+  @override
+  Future<void> next() => _controller.player.next();
+
+  @override
+  Future<void> previous() => _controller.player.previous();
+
+  @override
+  Future<void> seek(Duration position) => _controller.player.seek(position);
+
+  @override
+  Future<void> setVolume(double volume) => _controller.player.setVolume(volume);
+
+  @override
+  Future<String?> getNativeProperty(String name) async {
+    final dynamic platform = _controller.player.platform;
+    return await platform.getProperty(name) as String?;
+  }
+
+  @override
+  void setSubtitlePadding(EdgeInsets padding) {
+    state.setSubtitleViewPadding(padding);
+  }
+
+  @override
+  bool isFullscreen(BuildContext context) =>
+      fullscreen_methods.isFullscreen(context);
+
+  @override
+  Future<void> toggleFullscreen(BuildContext context) =>
+      fullscreen_methods.toggleFullscreen(context);
+
+  @override
+  Future<void> exitFullscreen(BuildContext context) =>
+      fullscreen_methods.exitFullscreen(context);
 }
 
 /// [MaterialDesktopVideoControlsThemeData] available in this [context].
@@ -436,8 +618,7 @@ class _MaterialDesktopVideoControlsState
   DateTime? _lastInteractionAt;
   bool _unmountScheduled = false;
 
-  late /* private */ var playlist = controller(context).player.state.playlist;
-  late bool buffering = controller(context).player.state.buffering;
+  late bool buffering = _adapter(context).buffering;
 
   DateTime last = DateTime.now();
 
@@ -466,14 +647,10 @@ class _MaterialDesktopVideoControlsState
 
       subscriptions.addAll(
         [
-          controller(context).player.stream.playlist.listen(
-            (event) {
-              setState(() {
-                playlist = event;
-              });
-            },
-          ),
-          controller(context).player.stream.buffering.listen(
+          _adapter(context).playlistLengthStream.listen((event) {
+            setState(() {});
+          }),
+          _adapter(context).bufferingStream.listen(
             (event) {
               setState(() {
                 buffering = event;
@@ -501,8 +678,8 @@ class _MaterialDesktopVideoControlsState
 
   void shiftSubtitle() {
     if (_theme(context).shiftSubtitlesOnControlsVisibilityChange) {
-      state(context).setSubtitleViewPadding(
-        state(context).widget.subtitleViewConfiguration.padding +
+      _adapter(context).setSubtitlePadding(
+        _adapter(context).subtitlePadding +
             EdgeInsets.fromLTRB(
               0.0,
               0.0,
@@ -515,9 +692,7 @@ class _MaterialDesktopVideoControlsState
 
   void unshiftSubtitle() {
     if (_theme(context).shiftSubtitlesOnControlsVisibilityChange) {
-      state(context).setSubtitleViewPadding(
-        state(context).widget.subtitleViewConfiguration.padding,
-      );
+      _adapter(context).setSubtitlePadding(_adapter(context).subtitlePadding);
     }
   }
 
@@ -631,56 +806,56 @@ class _MaterialDesktopVideoControlsState
               // Default key-board shortcuts.
               // https://support.google.com/youtube/answer/7631406
               const SingleActivator(LogicalKeyboardKey.mediaPlay): () =>
-                  controller(context).player.play(),
+                  _adapter(context).play(),
               const SingleActivator(LogicalKeyboardKey.mediaPause): () =>
-                  controller(context).player.pause(),
+                  _adapter(context).pause(),
               const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () =>
-                  controller(context).player.playOrPause(),
+                  _adapter(context).playOrPause(),
               const SingleActivator(LogicalKeyboardKey.mediaTrackNext): () =>
-                  controller(context).player.next(),
+                  _adapter(context).next(),
               const SingleActivator(LogicalKeyboardKey.mediaTrackPrevious):
-                  () => controller(context).player.previous(),
+                  () => _adapter(context).previous(),
               const SingleActivator(LogicalKeyboardKey.space): () =>
-                  controller(context).player.playOrPause(),
+                  _adapter(context).playOrPause(),
               const SingleActivator(LogicalKeyboardKey.keyJ): () {
-                final rate = controller(context).player.state.position -
+                final rate = _adapter(context).position -
                     const Duration(seconds: 10);
-                controller(context).player.seek(rate);
+                _adapter(context).seek(rate);
               },
               const SingleActivator(LogicalKeyboardKey.keyI): () {
-                final rate = controller(context).player.state.position +
+                final rate = _adapter(context).position +
                     const Duration(seconds: 10);
-                controller(context).player.seek(rate);
+                _adapter(context).seek(rate);
               },
               const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
-                final rate = controller(context).player.state.position -
+                final rate = _adapter(context).position -
                     const Duration(seconds: 2);
-                controller(context).player.seek(rate);
+                _adapter(context).seek(rate);
               },
               const SingleActivator(LogicalKeyboardKey.arrowRight): () {
-                final rate = controller(context).player.state.position +
+                final rate = _adapter(context).position +
                     const Duration(seconds: 2);
-                controller(context).player.seek(rate);
+                _adapter(context).seek(rate);
               },
               const SingleActivator(LogicalKeyboardKey.arrowUp): () {
-                final volume = controller(context).player.state.volume + 5.0;
-                controller(context).player.setVolume(volume.clamp(0.0, 100.0));
+                final volume = _adapter(context).volume + 5.0;
+                _adapter(context).setVolume(volume.clamp(0.0, 100.0));
               },
               const SingleActivator(LogicalKeyboardKey.arrowDown): () {
-                final volume = controller(context).player.state.volume - 5.0;
-                controller(context).player.setVolume(volume.clamp(0.0, 100.0));
+                final volume = _adapter(context).volume - 5.0;
+                _adapter(context).setVolume(volume.clamp(0.0, 100.0));
               },
               const SingleActivator(LogicalKeyboardKey.keyF): () =>
-                  toggleFullscreen(context),
+                  _adapter(context).toggleFullscreen(context),
               const SingleActivator(LogicalKeyboardKey.escape): () =>
-                  exitFullscreen(context),
+                  _adapter(context).exitFullscreen(context),
             },
 
         /// Add [Directionality] to ltr to avoid wrong animation of sides.
         child: Directionality(
           textDirection: TextDirection.ltr,
           child: Focus(
-            focusNode: videoViewParametersNotifier(context).value.focusNode,
+            focusNode: _adapter(context).focusNode,
             autofocus: true,
             child: Material(
               elevation: 0.0,
@@ -695,17 +870,13 @@ class _MaterialDesktopVideoControlsState
                     ? (e) {
                         if (e is PointerScrollEvent) {
                           if (e.delta.dy > 0) {
-                            final volume =
-                                controller(context).player.state.volume - 5.0;
-                            controller(context)
-                                .player
+                            final volume = _adapter(context).volume - 5.0;
+                            _adapter(context)
                                 .setVolume(volume.clamp(0.0, 100.0));
                           }
                           if (e.delta.dy < 0) {
-                            final volume =
-                                controller(context).player.state.volume + 5.0;
-                            controller(context)
-                                .player
+                            final volume = _adapter(context).volume + 5.0;
+                            _adapter(context)
                                 .setVolume(volume.clamp(0.0, 100.0));
                           }
                         }
@@ -727,7 +898,7 @@ class _MaterialDesktopVideoControlsState
                                       tapPadding) {
                             // Only play and pause when the bottom seek bar is visible
                             // and when clicking outside of the bottom seek bar region
-                            controller(context).player.playOrPause();
+                            _adapter(context).playOrPause();
                           }
                         },
                   onTapUp: !_theme(context).toggleFullscreenOnDoublePress
@@ -737,23 +908,19 @@ class _MaterialDesktopVideoControlsState
                           final difference = now.difference(last);
                           last = now;
                           if (difference < const Duration(milliseconds: 400)) {
-                            toggleFullscreen(context);
+                            _adapter(context).toggleFullscreen(context);
                           }
                         },
                   onPanUpdate: _theme(context).modifyVolumeOnScroll
                       ? (e) {
                           if (e.delta.dy > 0) {
-                            final volume =
-                                controller(context).player.state.volume - 5.0;
-                            controller(context)
-                                .player
+                            final volume = _adapter(context).volume - 5.0;
+                            _adapter(context)
                                 .setVolume(volume.clamp(0.0, 100.0));
                           }
                           if (e.delta.dy < 0) {
-                            final volume =
-                                controller(context).player.state.volume + 5.0;
-                            controller(context)
-                                .player
+                            final volume = _adapter(context).volume + 5.0;
+                            _adapter(context)
                                 .setVolume(volume.clamp(0.0, 100.0));
                           }
                         }
@@ -818,7 +985,8 @@ class _MaterialDesktopVideoControlsState
                                   padding: _theme(context).padding ??
                                       (
                                           // Add padding in fullscreen!
-                                          isFullscreen(context)
+                                          _adapter(context)
+                                                  .isFullscreen(context)
                                               ? MediaQuery.of(context).padding
                                               : EdgeInsets.zero),
                                   child: Column(
@@ -917,7 +1085,7 @@ class _MaterialDesktopVideoControlsState
                             padding: _theme(context).padding ??
                                 (
                                     // Add padding in fullscreen!
-                                    isFullscreen(context)
+                                    _adapter(context).isFullscreen(context)
                                         ? MediaQuery.of(context).padding
                                         : EdgeInsets.zero),
                             child: Column(
@@ -1013,7 +1181,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   bool click = false;
   double slider = 0.0;
 
-  late VideoController _controller;
+  late MaterialDesktopVideoControlsAdapter _controls;
   late bool playing;
   late Duration position;
   late Duration duration;
@@ -1037,33 +1205,33 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final nextController = controller(context);
-    final controllerChanged =
-        subscriptions.isEmpty || !identical(_controller, nextController);
-    if (controllerChanged) {
+    final nextControls = _adapter(context);
+    final controlsChanged =
+        subscriptions.isEmpty || !identical(_controls, nextControls);
+    if (controlsChanged) {
       for (final subscription in subscriptions) {
         subscription.cancel();
       }
       subscriptions.clear();
-      _controller = nextController;
+      _controls = nextControls;
     }
 
     final controlsTheme = _theme(context);
     chaptersExternallyManaged = controlsTheme.videoChapters != null;
     if (chaptersExternallyManaged && chapters.isNotEmpty) {
       chapters = [];
-    } else if (controllerChanged && chapters.isNotEmpty) {
+    } else if (controlsChanged && chapters.isNotEmpty) {
       chapters = [];
     }
 
-    if (controllerChanged) {
+    if (controlsChanged) {
       _positionUpdateTimer?.cancel();
       _positionUpdateTimer = null;
       _pendingPosition = null;
-      playing = _controller.player.state.playing;
-      position = _controller.player.state.position;
-      duration = _controller.player.state.duration;
-      buffer = _controller.player.state.buffer;
+      playing = _controls.playing;
+      position = _controls.position;
+      duration = _controls.duration;
+      buffer = _controls.buffer;
 
       if (!chaptersExternallyManaged &&
           duration > Duration.zero &&
@@ -1072,12 +1240,12 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       }
       subscriptions.addAll(
         [
-          _controller.player.stream.playing.listen((event) {
+          _controls.playingStream.listen((event) {
             setState(() {
               playing = event;
             });
           }),
-          _controller.player.stream.completed.listen((event) {
+          _controls.completedStream.listen((event) {
             _positionUpdateTimer?.cancel();
             _positionUpdateTimer = null;
             _pendingPosition = null;
@@ -1085,7 +1253,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
               position = Duration.zero;
             });
           }),
-          _controller.player.stream.position.listen((event) {
+          _controls.positionStream.listen((event) {
             if (click) return;
             _pendingPosition = event;
 
@@ -1100,7 +1268,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
               );
             }
           }),
-          _controller.player.stream.duration.listen((event) {
+          _controls.durationStream.listen((event) {
             setState(() {
               duration = event;
             });
@@ -1118,7 +1286,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
               _fetchChapters();
             }
           }),
-          _controller.player.stream.buffer.listen((event) {
+          _controls.bufferStream.listen((event) {
             setState(() {
               buffer = event;
             });
@@ -1141,15 +1309,16 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
     try {
       if (chaptersExternallyManaged) return;
 
-      final dynamic platform = _controller.player.platform;
-      final countStr = await platform.getProperty('chapter-list/count');
+      final countStr = await _controls.getNativeProperty('chapter-list/count');
       if (countStr != null && countStr.isNotEmpty) {
         final count = int.tryParse(countStr) ?? 0;
         if (count > 0) {
           final List<VideoChapter> newChapters = [];
           for (int i = 0; i < count; i++) {
-            final title = await platform.getProperty('chapter-list/$i/title');
-            final timeStr = await platform.getProperty('chapter-list/$i/time');
+            final title =
+                await _controls.getNativeProperty('chapter-list/$i/title');
+            final timeStr =
+                await _controls.getNativeProperty('chapter-list/$i/time');
             newChapters.add(VideoChapter(
               i,
               title ?? 'Chapter ${i + 1}',
@@ -1175,7 +1344,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       hover = true;
       slider = percent.clamp(0.0, 1.0);
     });
-    _controller.player.seek(duration * slider);
+    _controls.seek(duration * slider);
   }
 
   void onPointerDown() {
@@ -1197,7 +1366,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       click = false;
       position = duration * slider;
     });
-    _controller.player.seek(duration * slider);
+    _controls.seek(duration * slider);
   }
 
   void _flushPositionUpdate([DateTime? timestamp]) {
@@ -1435,7 +1604,7 @@ class MaterialDesktopPlayOrPauseButtonState
     with SingleTickerProviderStateMixin {
   late final animation = AnimationController(
     vsync: this,
-    value: controller(context).player.state.playing ? 1 : 0,
+    value: _adapter(context).playing ? 1 : 0,
     duration: const Duration(milliseconds: 200),
   );
 
@@ -1451,7 +1620,7 @@ class MaterialDesktopPlayOrPauseButtonState
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    subscription ??= controller(context).player.stream.playing.listen((event) {
+    subscription ??= _adapter(context).playingStream.listen((event) {
       if (event) {
         animation.forward();
       } else {
@@ -1470,7 +1639,7 @@ class MaterialDesktopPlayOrPauseButtonState
   @override
   Widget build(BuildContext context) {
     return IconButton(
-      onPressed: controller(context).player.playOrPause,
+      onPressed: _adapter(context).playOrPause,
       iconSize: widget.iconSize ?? _theme(context).buttonBarButtonSize,
       color: widget.iconColor ?? _theme(context).buttonBarButtonColor,
       icon: AnimatedIcon(
@@ -1506,10 +1675,10 @@ class MaterialDesktopSkipNextButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!_theme(context).automaticallyImplySkipNextButton ||
-        (controller(context).player.state.playlist.medias.length > 1 &&
+        (_adapter(context).playlistLength > 1 &&
             _theme(context).automaticallyImplySkipNextButton)) {
       return IconButton(
-        onPressed: controller(context).player.next,
+        onPressed: _adapter(context).next,
         icon: icon ?? const Icon(Icons.skip_next),
         iconSize: iconSize ?? _theme(context).buttonBarButtonSize,
         color: iconColor ?? _theme(context).buttonBarButtonColor,
@@ -1542,10 +1711,10 @@ class MaterialDesktopSkipPreviousButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!_theme(context).automaticallyImplySkipPreviousButton ||
-        (controller(context).player.state.playlist.medias.length > 1 &&
+        (_adapter(context).playlistLength > 1 &&
             _theme(context).automaticallyImplySkipPreviousButton)) {
       return IconButton(
-        onPressed: controller(context).player.previous,
+        onPressed: _adapter(context).previous,
         icon: icon ?? const Icon(Icons.skip_previous),
         iconSize: iconSize ?? _theme(context).buttonBarButtonSize,
         color: iconColor ?? _theme(context).buttonBarButtonColor,
@@ -1578,9 +1747,9 @@ class MaterialDesktopFullscreenButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return IconButton(
-      onPressed: () => toggleFullscreen(context),
+      onPressed: () => _adapter(context).toggleFullscreen(context),
       icon: icon ??
-          (isFullscreen(context)
+          (_adapter(context).isFullscreen(context)
               ? const Icon(Icons.fullscreen_exit)
               : const Icon(Icons.fullscreen)),
       iconSize: iconSize ?? _theme(context).buttonBarButtonSize,
@@ -1664,7 +1833,7 @@ class MaterialDesktopVolumeButton extends StatefulWidget {
 class MaterialDesktopVolumeButtonState
     extends State<MaterialDesktopVolumeButton>
     with SingleTickerProviderStateMixin {
-  late double volume = controller(context).player.state.volume;
+  late double volume = _adapter(context).volume;
 
   StreamSubscription<double>? subscription;
 
@@ -1683,7 +1852,7 @@ class MaterialDesktopVolumeButtonState
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    subscription ??= controller(context).player.stream.volume.listen((event) {
+    subscription ??= _adapter(context).volumeStream.listen((event) {
       setState(() {
         volume = event;
       });
@@ -1713,14 +1882,14 @@ class MaterialDesktopVolumeButtonState
         onPointerSignal: (event) {
           if (event is PointerScrollEvent) {
             if (event.scrollDelta.dy < 0) {
-              controller(context).player.setVolume(
-                    (volume + 5.0).clamp(0.0, 100.0),
-                  );
+              _adapter(context).setVolume(
+                (volume + 5.0).clamp(0.0, 100.0),
+              );
             }
             if (event.scrollDelta.dy > 0) {
-              controller(context).player.setVolume(
-                    (volume - 5.0).clamp(0.0, 100.0),
-                  );
+              _adapter(context).setVolume(
+                (volume - 5.0).clamp(0.0, 100.0),
+              );
             }
           }
         },
@@ -1730,17 +1899,17 @@ class MaterialDesktopVolumeButtonState
             IconButton(
               onPressed: () async {
                 if (mute) {
-                  await controller(context).player.setVolume(_volume);
+                  await _adapter(context).setVolume(_volume);
                   mute = !mute;
                 }
                 // https://github.com/media-kit/media-kit/pull/250#issuecomment-1605588306
                 else if (volume == 0.0) {
                   _volume = 100.0;
-                  await controller(context).player.setVolume(100.0);
+                  await _adapter(context).setVolume(100.0);
                   mute = false;
                 } else {
                   _volume = volume;
-                  await controller(context).player.setVolume(0.0);
+                  await _adapter(context).setVolume(0.0);
                   mute = !mute;
                 }
 
@@ -1805,7 +1974,7 @@ class MaterialDesktopVolumeButtonState
                             min: 0.0,
                             max: 100.0,
                             onChanged: (value) async {
-                              await controller(context).player.setVolume(value);
+                              await _adapter(context).setVolume(value);
                               mute = false;
                               setState(() {});
                             },
@@ -1842,8 +2011,8 @@ class MaterialDesktopPositionIndicatorState
     extends State<MaterialDesktopPositionIndicator> {
   static const _positionUiUpdateInterval = Duration(milliseconds: 66);
 
-  late Duration position = controller(context).player.state.position;
-  late Duration duration = controller(context).player.state.duration;
+  late Duration position = _adapter(context).position;
+  late Duration duration = _adapter(context).duration;
 
   final List<StreamSubscription> subscriptions = [];
   Timer? _positionUpdateTimer;
@@ -1863,7 +2032,7 @@ class MaterialDesktopPositionIndicatorState
     if (subscriptions.isEmpty) {
       subscriptions.addAll(
         [
-          controller(context).player.stream.position.listen((event) {
+          _adapter(context).positionStream.listen((event) {
             _pendingPosition = event;
             final now = DateTime.now();
             final elapsed = now.difference(_lastPositionUiUpdate);
@@ -1876,7 +2045,7 @@ class MaterialDesktopPositionIndicatorState
               );
             }
           }),
-          controller(context).player.stream.duration.listen((event) {
+          _adapter(context).durationStream.listen((event) {
             setState(() {
               duration = event;
             });
