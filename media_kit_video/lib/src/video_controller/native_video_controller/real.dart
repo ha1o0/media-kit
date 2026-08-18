@@ -52,6 +52,12 @@ class NativeVideoController extends PlatformVideoController {
 
   NativePlayer get platform => player.platform as NativePlayer;
 
+  @override
+  bool get usesNativeWindow =>
+      configuration.useNativeWindow && Platform.isWindows;
+
+  int? nativeWindowHandle;
+
   Future<void> setProperty(String key, String value) async {
     await platform.setProperty(key, value, waitForInitialization: false);
   }
@@ -78,8 +84,6 @@ class NativeVideoController extends PlatformVideoController {
           return;
         }
 
-        final int handle = await player.handle;
-
         final int width;
         final int height;
         if (event.rotate == 0 || event.rotate == 180) {
@@ -97,6 +101,21 @@ class NativeVideoController extends PlatformVideoController {
 
         videoParamsWidth = width;
         videoParamsHeight = height;
+
+        if (usesNativeWindow) {
+          rect.value = Rect.fromLTWH(
+            0.0,
+            0.0,
+            width.toDouble(),
+            height.toDouble(),
+          );
+          if (!waitUntilFirstFrameRenderedCompleter.isCompleted) {
+            waitUntilFirstFrameRenderedCompleter.complete();
+          }
+          return;
+        }
+
+        final int handle = await player.handle;
 
         // Preserve an explicitly requested output size. The video parameters
         // describe the decoded source and may change between playlist items,
@@ -122,7 +141,10 @@ class NativeVideoController extends PlatformVideoController {
   ) async {
     // Update [configuration] to have default values.
     configuration = configuration.copyWith(
-      vo: configuration.vo ?? 'libmpv',
+      vo: configuration.vo ??
+          (configuration.useNativeWindow && Platform.isWindows
+              ? 'gpu-next'
+              : 'libmpv'),
       hwdec: configuration.hwdec ?? 'auto',
     );
 
@@ -157,6 +179,31 @@ class NativeVideoController extends PlatformVideoController {
 
     // Store the [NativeVideoController] in the [_controllers].
     _controllers[handle] = controller;
+
+    if (controller.usesNativeWindow) {
+      final nativeWindowKey = configuration.nativeWindowKey ?? handle;
+      final nativeWindowHandle = configuration.nativeWindowHandle != null
+          ? await configuration.nativeWindowHandle!
+          : await _channel.invokeMethod<int>(
+              'NativeVideoWindow.Create',
+              {'handle': nativeWindowKey.toString()},
+            );
+      if (nativeWindowHandle == null || nativeWindowHandle == 0) {
+        throw StateError('Failed to create the Windows native video window.');
+      }
+      controller.nativeWindowHandle = nativeWindowHandle;
+      debugPrint(
+        'NativeVideoController: native key=$nativeWindowKey '
+        'hwnd=$nativeWindowHandle',
+      );
+      await controller.setProperties(
+        {
+          'hwdec': configuration.hwdec!,
+          'vid': 'auto',
+        },
+      );
+      return controller;
+    }
 
     await controller.setProperties(
       {
@@ -211,6 +258,11 @@ class NativeVideoController extends PlatformVideoController {
     int? width,
     int? height,
   }) async {
+    if (usesNativeWindow) {
+      this.width = width;
+      this.height = height;
+      return;
+    }
     final handle = await player.handle;
     if (this.width == width && this.height == height) {
       // No need to resize if the requested size is same as the current size.
@@ -241,18 +293,46 @@ class NativeVideoController extends PlatformVideoController {
     }
   }
 
+  @override
+  Future<void> setNativeWindowBounds(
+    Rect bounds, {
+    required bool visible,
+  }) async {
+    if (!usesNativeWindow) return;
+    final handle = configuration.nativeWindowKey ?? await player.handle;
+    await _channel.invokeMethod<void>(
+      'NativeVideoWindow.SetBounds',
+      {
+        'handle': handle.toString(),
+        'x': bounds.left,
+        'y': bounds.top,
+        'width': bounds.width,
+        'height': bounds.height,
+        'visible': visible,
+      },
+    );
+  }
+
   /// Disposes the instance. Releases allocated resources back to the system.
   Future<void> _dispose() async {
     super.dispose();
     await videoParamsSubscription?.cancel();
     final handle = await player.handle;
     _controllers.remove(handle);
-    await _channel.invokeMethod(
-      'VideoOutputManager.Dispose',
-      {
-        'handle': handle.toString(),
-      },
-    );
+    if (usesNativeWindow && configuration.nativeWindowHandle == null) {
+      final nativeWindowKey = configuration.nativeWindowKey ?? handle;
+      await _channel.invokeMethod(
+        'NativeVideoWindow.Dispose',
+        {'handle': nativeWindowKey.toString()},
+      );
+    } else if (!usesNativeWindow) {
+      await _channel.invokeMethod(
+        'VideoOutputManager.Dispose',
+        {
+          'handle': handle.toString(),
+        },
+      );
+    }
   }
 
   /// Currently created [NativeVideoController]s.

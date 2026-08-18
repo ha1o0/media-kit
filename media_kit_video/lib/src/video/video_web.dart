@@ -120,6 +120,10 @@ class Video extends StatefulWidget {
   /// FocusNode for keyboard input.
   final FocusNode? focusNode;
 
+  /// Kept for API parity with native platforms. Web always renders through
+  /// its HTML video element.
+  final bool renderTexture;
+
   /// {@macro video}
   const Video({
     super.key,
@@ -141,6 +145,7 @@ class Video extends StatefulWidget {
     this.onEnterFullscreen = defaultEnterNativeFullscreen,
     this.onExitFullscreen = defaultExitNativeFullscreen,
     this.focusNode,
+    this.renderTexture = true,
   });
 
   @override

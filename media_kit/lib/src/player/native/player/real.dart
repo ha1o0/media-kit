@@ -2398,6 +2398,11 @@ class NativePlayer extends PlatformPlayer {
           'audiounit-skip-session-management': 'yes',
       };
 
+      final preInitOptions = await configuration.preInitOptionsBuilder?.call();
+      if (preInitOptions != null) {
+        options.addAll(preInitOptions);
+      }
+
       if (Platform.isAndroid &&
           configuration.libass &&
           configuration.libassAndroidFont != null &&

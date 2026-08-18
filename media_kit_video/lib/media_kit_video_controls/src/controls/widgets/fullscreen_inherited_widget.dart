@@ -63,6 +63,11 @@ class _FullscreenInheritedWidgetPopScopeState
   Widget build(BuildContext context) {
     return PopScope(
       onPopInvokedWithResult: (_, __) {
+        // Restore the source Video's native-window ownership even when the
+        // route is dismissed by Escape, the system back action or Navigator.
+        FullscreenInheritedWidget.of(context)
+            .parent
+            .setNativeFullscreenRouteActive(false);
         // Make sure to exit native fullscreen when this route is popped from the navigator.
         onExitFullscreen(context)?.call();
       },

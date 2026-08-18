@@ -526,6 +526,13 @@ class PlayerConfiguration {
   /// properties are handled by libmpv in the same way as other properties.
   final Map<String, String> propertyOverrides;
 
+  /// Supplies options that must be applied before `mpv_initialize`.
+  ///
+  /// This is intentionally separate from [propertyOverrides], which are
+  /// runtime properties. The callback permits embedders to asynchronously
+  /// allocate native resources such as a Windows HWND first.
+  final Future<Map<String, String>> Function()? preInitOptionsBuilder;
+
   /// Whether [Player] should let mpv configure and activate the global
   /// `AVAudioSession` on iOS.
   ///
@@ -570,6 +577,7 @@ class PlayerConfiguration {
       'crypto',
     ],
     this.propertyOverrides = const {},
+    this.preInitOptionsBuilder,
     this.iosManageAudioSession = true,
   });
 }

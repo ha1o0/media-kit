@@ -27,12 +27,19 @@ Future<void> enterFullscreen(BuildContext context) {
         final videoViewParametersNotifierValue =
             videoViewParametersNotifier(context);
         final controllerValue = controller(context);
+        final renderTexture = stateValue.widget.renderTexture;
+        // A native Video uses one shared HWND. Keep the original route from
+        // publishing its old bounds while the fullscreen copy is mounted.
+        stateValue.setNativeFullscreenRouteActive(true);
         Navigator.of(context, rootNavigator: true).push(
           PageRouteBuilder(
             pageBuilder: (_, __, ___) => ColoredBox(
-              color: Colors.black,
+              color: renderTexture ? Colors.black : Colors.transparent,
               child: SizedBox.expand(
                 child: Material(
+                  type: renderTexture
+                      ? MaterialType.canvas
+                      : MaterialType.transparency,
                   child: VideoControlsThemeDataInjector(
                     // NOTE: Make various *VideoControlsThemeData from the parent context available in the fullscreen context.
                     context: context,
@@ -81,6 +88,8 @@ Future<void> enterFullscreen(BuildContext context) {
                                 stateValue.widget.onEnterFullscreen,
                             onExitFullscreen:
                                 stateValue.widget.onExitFullscreen,
+                            renderTexture: renderTexture,
+                            nativeWindowVisible: true,
                           ),
                         ),
                       ),
@@ -111,11 +120,11 @@ Future<void> exitFullscreen(BuildContext context) {
   return lock.synchronized(() async {
     if (isFullscreen(context)) {
       if (context.mounted) {
+        final parent = FullscreenInheritedWidget.of(context).parent;
         await Navigator.of(context).maybePop();
+        parent.setNativeFullscreenRouteActive(false);
         // It is known that this [context] will have a [FullscreenInheritedWidget] above it.
-        if (context.mounted) {
-          FullscreenInheritedWidget.of(context).parent.refreshView();
-        }
+        if (context.mounted) parent.refreshView();
       }
       // [exitNativeFullscreen] is moved to [WillPopScope] in [FullscreenInheritedWidget].
       // This is because [exitNativeFullscreen] needs to be called when the user presses the back button.

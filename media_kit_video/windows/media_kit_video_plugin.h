@@ -12,10 +12,12 @@
 #include <flutter/plugin_registrar_windows.h>
 #include <Windows.h>
 #include <functional>
-#include <queue>
 #include <mutex>
+#include <optional>
+#include <queue>
 
 #include "video_output_manager.h"
+#include "native_video_window_manager.h"
 
 namespace media_kit_video {
 
@@ -31,25 +33,29 @@ class MediaKitVideoPlugin : public flutter::Plugin {
   MediaKitVideoPlugin& operator=(const MediaKitVideoPlugin&) = delete;
 
  private:
-  static constexpr UINT kMainThreadTaskMessage = WM_USER + 1001;
-
   void HandleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& method_call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   void RunOnMainThread(std::function<void()> task);
-  static LRESULT CALLBACK WindowProcDelegate(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+  std::optional<LRESULT> HandleWindowProc(HWND hwnd,
+                                          UINT message,
+                                          WPARAM wparam,
+                                          LPARAM lparam);
+  void ScheduleNativeWindowSync();
   void ProcessMainThreadTasks();
   
   flutter::PluginRegistrarWindows* registrar_ = nullptr;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_ =
       nullptr;
+  std::unique_ptr<NativeVideoWindowManager> native_video_window_manager_ =
+      nullptr;
   std::unique_ptr<VideoOutputManager> video_output_manager_ = nullptr;
   HWND flutter_window_ = nullptr;
-  WNDPROC original_window_proc_ = nullptr;
+  int window_proc_id_ = -1;
+  bool native_window_sync_pending_ = false;
   std::queue<std::function<void()>> main_thread_tasks_;
   std::mutex main_thread_tasks_mutex_;
-  static MediaKitVideoPlugin* instance_;
 };
 
 }  // namespace media_kit_video

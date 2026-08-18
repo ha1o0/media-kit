@@ -122,6 +122,14 @@ class Video extends StatefulWidget {
   /// FocusNode for keyboard input.
   final FocusNode? focusNode;
 
+  /// Whether the video plane is rendered by Flutter's [Texture] widget.
+  /// Controls, subtitles and lifecycle behavior remain active when disabled.
+  final bool renderTexture;
+
+  /// Whether a native video window should remain visible while this widget is
+  /// retained in an offstage page. Fullscreen routes set this explicitly.
+  final bool nativeWindowVisible;
+
   /// {@macro video}
   const Video({
     super.key,
@@ -143,6 +151,8 @@ class Video extends StatefulWidget {
     this.onEnterFullscreen = defaultEnterNativeFullscreen,
     this.onExitFullscreen = defaultExitNativeFullscreen,
     this.focusNode,
+    this.renderTexture = true,
+    this.nativeWindowVisible = true,
   });
 
   @override
@@ -154,13 +164,23 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   late ValueNotifier<VideoViewParameters> videoViewParametersNotifier;
   late bool _disposeNotifiers;
   final _subtitleViewKey = GlobalKey<SubtitleViewState>();
+  final _nativeWindowViewportKey = GlobalKey();
   final _wakelock = Wakelock();
   final _subscriptions = <StreamSubscription>[];
   late int? _width = widget.controller.player.state.width;
   late int? _height = widget.controller.player.state.height;
-  late bool _visible = (_width ?? 0) > 0 && (_height ?? 0) > 0;
+  late bool _visible =
+      !widget.renderTexture || ((_width ?? 0) > 0 && (_height ?? 0) > 0);
 
   bool _pauseDueToPauseUponEnteringBackgroundMode = false;
+  bool _nativeWindowSyncScheduled = false;
+  bool _tickerModeEnabled = true;
+  // The source Video remains mounted while media-kit's fullscreen route is
+  // pushed.  A native HWND is a single shared resource, so the source must
+  // stop publishing its old viewport while the fullscreen copy owns it.
+  bool _nativeFullscreenRouteActive = false;
+  Rect? _lastNativeWindowBounds;
+  bool? _lastNativeWindowVisible;
   // Public API:
   bool isFullscreen() {
     final context = _contextNotifier.value;
@@ -229,6 +249,9 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   @override
   void didChangeDependencies() {
+    final tickerModeEnabled = TickerMode.valuesOf(context).enabled;
+    final tickerModeChanged = _tickerModeEnabled != tickerModeEnabled;
+    _tickerModeEnabled = tickerModeEnabled;
     videoViewParametersNotifier =
         media_kit_video_controls.VideoStateInheritedWidget.maybeOf(
               context,
@@ -255,11 +278,24 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
             )?.disposeNotifiers ??
             true;
     super.didChangeDependencies();
+    if (!widget.renderTexture && tickerModeChanged) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _forceNativeWindowSync();
+      });
+    }
   }
 
   @override
   void didUpdateWidget(Video oldWidget) {
     super.didUpdateWidget(oldWidget);
+
+    if (widget.renderTexture != oldWidget.renderTexture ||
+        widget.nativeWindowVisible != oldWidget.nativeWindowVisible) {
+      _visible =
+          !widget.renderTexture || ((_width ?? 0) > 0 && (_height ?? 0) > 0);
+      _lastNativeWindowBounds = null;
+      _lastNativeWindowVisible = null;
+    }
 
     final currentParams = videoViewParametersNotifier.value;
 
@@ -342,7 +378,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
         widget.controller.player.stream.width.listen(
           (value) {
             _width = value;
-            final visible = (_width ?? 0) > 0 && (_height ?? 0) > 0;
+            final visible = !widget.renderTexture ||
+                ((_width ?? 0) > 0 && (_height ?? 0) > 0);
             if (mounted && _visible != visible) {
               setState(() {
                 _visible = visible;
@@ -353,7 +390,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
         widget.controller.player.stream.height.listen(
           (value) {
             _height = value;
-            final visible = (_width ?? 0) > 0 && (_height ?? 0) > 0;
+            final visible = !widget.renderTexture ||
+                ((_width ?? 0) > 0 && (_height ?? 0) > 0);
             if (mounted && _visible != visible) {
               setState(() {
                 _visible = visible;
@@ -361,6 +399,19 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
             }
           },
         ),
+        if (!widget.renderTexture)
+          widget.controller.player.stream.videoParams.listen((value) {
+            if ((value.dw ?? value.w ?? 0) > 0 &&
+                (value.dh ?? value.h ?? 0) > 0) {
+              _forceNativeWindowSync();
+            }
+          }),
+        if (!widget.renderTexture)
+          widget.controller.player.stream.playing.listen((value) {
+            if (value) {
+              _forceNativeWindowSync();
+            }
+          }),
       ],
     );
     // --------------------------------------------------
@@ -400,6 +451,82 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   void refreshView() {}
 
+  /// Transfers native-window layout ownership to/from media-kit's fullscreen
+  /// route.  This is intentionally a no-op for Flutter Texture rendering.
+  void setNativeFullscreenRouteActive(bool active) {
+    if (widget.renderTexture || _nativeFullscreenRouteActive == active) {
+      return;
+    }
+    _nativeFullscreenRouteActive = active;
+    if (!active) {
+      _forceNativeWindowSync();
+    }
+  }
+
+  bool get nativeFullscreenRouteActive => _nativeFullscreenRouteActive;
+
+  void _scheduleNativeWindowSync() {
+    if (widget.renderTexture || _nativeWindowSyncScheduled) return;
+    // The original Video is retained underneath the fullscreen route.  Do
+    // not let its stale RenderBox overwrite the fullscreen HWND bounds.
+    final fullscreenRoute =
+        media_kit_video_controls.FullscreenInheritedWidget.maybeOf(context);
+    final ownsNativeFullscreenWindow = fullscreenRoute == null
+        ? !_nativeFullscreenRouteActive
+        : fullscreenRoute.parent.nativeFullscreenRouteActive;
+    if (!ownsNativeFullscreenWindow) {
+      return;
+    }
+    _nativeWindowSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _nativeWindowSyncScheduled = false;
+      if (!mounted) return;
+      final platform = widget.controller.notifier.value;
+      final renderObject =
+          _nativeWindowViewportKey.currentContext?.findRenderObject();
+      if (platform == null ||
+          !platform.usesNativeWindow ||
+          renderObject is! RenderBox ||
+          !renderObject.hasSize) {
+        return;
+      }
+
+      final origin = renderObject.localToGlobal(Offset.zero);
+      final bounds = origin & renderObject.size;
+      // TickerMode is disabled for every covered route, including dialogs and
+      // the source Video while media-kit's fullscreen Video is being mounted.
+      // It therefore cannot represent native-window visibility: hiding here
+      // blanks the video under dialogs and can race the fullscreen view. Keep
+      // using TickerMode changes to trigger a bounds resync, but let the
+      // mounted native view remain visible. Opaque Flutter routes cover it.
+      final visible = _visible && widget.nativeWindowVisible;
+      if (_lastNativeWindowBounds == bounds &&
+          _lastNativeWindowVisible == visible) {
+        return;
+      }
+      _lastNativeWindowBounds = bounds;
+      _lastNativeWindowVisible = visible;
+      unawaited(
+        platform.setNativeWindowBounds(bounds, visible: visible).catchError(
+          (Object error, StackTrace stackTrace) {
+            debugPrint(
+              'Video: failed to update native window bounds: '
+              '$error\n$stackTrace',
+            );
+          },
+        ),
+      );
+    });
+  }
+
+  void _forceNativeWindowSync() {
+    if (widget.renderTexture || !mounted) return;
+    _lastNativeWindowBounds = null;
+    _lastNativeWindowVisible = null;
+    _scheduleNativeWindowSync();
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
   Widget _maybeRepaintBoundary({required Widget child}) {
     // This optimization targets the Windows high-refresh Texture path. Keep
     // other platforms on their original layer tree until they are profiled.
@@ -408,6 +535,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    _scheduleNativeWindowSync();
     return media_kit_video_controls.VideoStateInheritedWidget(
       state: this as dynamic,
       contextNotifier: _contextNotifier,
@@ -416,6 +544,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
         valueListenable: videoViewParametersNotifier,
         builder: (context, videoViewParameters, _) {
           return Container(
+            key: _nativeWindowViewportKey,
             clipBehavior: Clip.none,
             width: videoViewParameters.width,
             height: videoViewParameters.height,
@@ -423,82 +552,91 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
             child: Stack(
               fit: StackFit.expand,
               children: [
+                if (!widget.renderTexture)
+                  ValueListenableBuilder<PlatformVideoController?>(
+                    valueListenable: widget.controller.notifier,
+                    builder: (context, _, __) {
+                      _scheduleNativeWindowSync();
+                      return const SizedBox.expand();
+                    },
+                  ),
                 // Isolate the video texture into its own compositing layer.
                 // Without this boundary, any setState in the controls or
                 // subtitle layers forces Flutter to re-rasterize the entire
                 // Stack — including the (potentially 4K) video texture — on
                 // every frame.  With separate RepaintBoundary layers, only
                 // the dirty layer is re-rasterized.
-                _maybeRepaintBoundary(
-                  child: ClipRect(
-                    child: FittedBox(
-                      fit: videoViewParameters.fit,
-                      alignment: videoViewParameters.alignment,
-                      child: ValueListenableBuilder<PlatformVideoController?>(
-                        valueListenable: widget.controller.notifier,
-                        builder: (context, notifier, _) => notifier == null
-                            ? const SizedBox.shrink()
-                            : ValueListenableBuilder<int?>(
-                                valueListenable: notifier.id,
-                                builder: (context, id, _) {
-                                  return ValueListenableBuilder<Rect?>(
-                                    valueListenable: notifier.rect,
-                                    builder: (context, rect, _) {
-                                      if (id != null &&
-                                          rect != null &&
-                                          _visible) {
-                                        final view = SizedBox(
-                                          // Apply aspect ratio if provided.
-                                          width:
-                                              videoViewParameters.aspectRatio ==
-                                                      null
-                                                  ? rect.width
-                                                  : rect.height *
-                                                      videoViewParameters
-                                                          .aspectRatio!,
-                                          height: rect.height,
-                                          child: Stack(
-                                            children: [
-                                              const SizedBox(),
-                                              Positioned.fill(
-                                                child: Texture(
-                                                  textureId: id,
-                                                  filterQuality:
-                                                      videoViewParameters
-                                                          .filterQuality,
-                                                ),
-                                              ),
-                                              // Keep the |Texture| hidden before the first frame renders. In native implementation, if no default frame size is passed (through VideoController), a starting 1 pixel sized texture/surface is created to initialize the render context & check for H/W support.
-                                              // This is then resized based on the video dimensions & accordingly texture ID, texture, EGLDisplay, EGLSurface etc. (depending upon platform) are also changed. Just don't show that 1 pixel texture to the UI.
-                                              // NOTE: Unmounting |Texture| causes the |MarkTextureFrameAvailable| to not do anything on GNU/Linux.
-                                              if (rect.width <= 1.0 &&
-                                                  rect.height <= 1.0)
+                if (widget.renderTexture)
+                  _maybeRepaintBoundary(
+                    child: ClipRect(
+                      child: FittedBox(
+                        fit: videoViewParameters.fit,
+                        alignment: videoViewParameters.alignment,
+                        child: ValueListenableBuilder<PlatformVideoController?>(
+                          valueListenable: widget.controller.notifier,
+                          builder: (context, notifier, _) => notifier == null
+                              ? const SizedBox.shrink()
+                              : ValueListenableBuilder<int?>(
+                                  valueListenable: notifier.id,
+                                  builder: (context, id, _) {
+                                    return ValueListenableBuilder<Rect?>(
+                                      valueListenable: notifier.rect,
+                                      builder: (context, rect, _) {
+                                        if (id != null &&
+                                            rect != null &&
+                                            _visible) {
+                                          final view = SizedBox(
+                                            // Apply aspect ratio if provided.
+                                            width: videoViewParameters
+                                                        .aspectRatio ==
+                                                    null
+                                                ? rect.width
+                                                : rect.height *
+                                                    videoViewParameters
+                                                        .aspectRatio!,
+                                            height: rect.height,
+                                            child: Stack(
+                                              children: [
+                                                const SizedBox(),
                                                 Positioned.fill(
-                                                  child: Container(
-                                                    color:
-                                                        videoViewParameters.fill,
+                                                  child: Texture(
+                                                    textureId: id,
+                                                    filterQuality:
+                                                        videoViewParameters
+                                                            .filterQuality,
                                                   ),
                                                 ),
-                                            ],
-                                          ),
-                                        );
-                                        return _VisualTransform(
-                                          rotation:
-                                              videoViewParameters.visualRotation,
-                                          mirror:
-                                              videoViewParameters.visualMirror,
-                                          child: view,
-                                        );
-                                      }
-                                      return const SizedBox.shrink();
-                                    },
-                                  );
-                                },
-                              ),
+                                                // Keep the |Texture| hidden before the first frame renders. In native implementation, if no default frame size is passed (through VideoController), a starting 1 pixel sized texture/surface is created to initialize the render context & check for H/W support.
+                                                // This is then resized based on the video dimensions & accordingly texture ID, texture, EGLDisplay, EGLSurface etc. (depending upon platform) are also changed. Just don't show that 1 pixel texture to the UI.
+                                                // NOTE: Unmounting |Texture| causes the |MarkTextureFrameAvailable| to not do anything on GNU/Linux.
+                                                if (rect.width <= 1.0 &&
+                                                    rect.height <= 1.0)
+                                                  Positioned.fill(
+                                                    child: Container(
+                                                      color: videoViewParameters
+                                                          .fill,
+                                                    ),
+                                                  ),
+                                              ],
+                                            ),
+                                          );
+                                          return _VisualTransform(
+                                            rotation: videoViewParameters
+                                                .visualRotation,
+                                            mirror: videoViewParameters
+                                                .visualMirror,
+                                            child: view,
+                                          );
+                                        }
+                                        return const SizedBox.shrink();
+                                      },
+                                    );
+                                  },
+                                ),
+                        ),
                       ),
                     ),
                   ),
-                ),
                 if (videoViewParameters.subtitleViewConfiguration.visible &&
                     !(widget.controller.player.platform?.configuration.libass ??
                         false))

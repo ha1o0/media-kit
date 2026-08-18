@@ -13,8 +13,19 @@
 #include <Windows.h>
 
 namespace media_kit_video {
+namespace {
 
-MediaKitVideoPlugin* MediaKitVideoPlugin::instance_ = nullptr;
+UINT RegisterPluginMessage(const wchar_t* name, UINT fallback) {
+  const UINT message = ::RegisterWindowMessageW(name);
+  return message != 0 ? message : fallback;
+}
+
+const UINT kMainThreadTaskMessage =
+    RegisterPluginMessage(L"media_kit_video.MainThreadTask", WM_APP + 0x6A1);
+const UINT kNativeWindowSyncMessage =
+    RegisterPluginMessage(L"media_kit_video.NativeWindowSync", WM_APP + 0x6A2);
+
+}  // namespace
 
 void MediaKitVideoPlugin::RegisterWithRegistrar(
     flutter::PluginRegistrarWindows* registrar) {
@@ -25,13 +36,15 @@ void MediaKitVideoPlugin::RegisterWithRegistrar(
 MediaKitVideoPlugin::MediaKitVideoPlugin(
     flutter::PluginRegistrarWindows* registrar)
     : registrar_(registrar),
+      native_video_window_manager_(
+          std::make_unique<NativeVideoWindowManager>(registrar)),
       video_output_manager_(std::make_unique<VideoOutputManager>(registrar)) {
-  instance_ = this;
   flutter_window_ =
       ::GetAncestor(registrar->GetView()->GetNativeWindow(), GA_ROOT);
-  original_window_proc_ = reinterpret_cast<WNDPROC>(
-      ::SetWindowLongPtr(flutter_window_, GWLP_WNDPROC,
-                         reinterpret_cast<LONG_PTR>(WindowProcDelegate)));
+  window_proc_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
+      [this](HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+        return HandleWindowProc(hwnd, message, wparam, lparam);
+      });
 
   channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       registrar->messenger(), "com.alexmercerind/media_kit_video",
@@ -42,12 +55,8 @@ MediaKitVideoPlugin::MediaKitVideoPlugin(
 }
 
 MediaKitVideoPlugin::~MediaKitVideoPlugin() {
-  if (flutter_window_ && original_window_proc_) {
-    ::SetWindowLongPtr(flutter_window_, GWLP_WNDPROC,
-                       reinterpret_cast<LONG_PTR>(original_window_proc_));
-  }
-  if (instance_ == this) {
-    instance_ = nullptr;
+  if (registrar_ && window_proc_id_ >= 0) {
+    registrar_->UnregisterTopLevelWindowProcDelegate(window_proc_id_);
   }
 }
 
@@ -64,21 +73,57 @@ void MediaKitVideoPlugin::RunOnMainThread(std::function<void()> task) {
   ::PostMessage(flutter_window_, kMainThreadTaskMessage, 0, 0);
 }
 
-LRESULT CALLBACK MediaKitVideoPlugin::WindowProcDelegate(HWND hwnd,
-                                                         UINT message,
-                                                         WPARAM wParam,
-                                                         LPARAM lParam) {
-  if (message == kMainThreadTaskMessage && instance_) {
-    instance_->ProcessMainThreadTasks();
-    return 0;
+std::optional<LRESULT> MediaKitVideoPlugin::HandleWindowProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM wparam,
+    LPARAM lparam) {
+  if (message == kMainThreadTaskMessage) {
+    ProcessMainThreadTasks();
+    return LRESULT{0};
   }
 
-  if (instance_ && instance_->original_window_proc_) {
-    return ::CallWindowProc(instance_->original_window_proc_, hwnd, message,
-                            wParam, lParam);
+  if (message == kNativeWindowSyncMessage) {
+    native_window_sync_pending_ = false;
+    if (native_video_window_manager_) {
+      native_video_window_manager_->SyncAll();
+    }
+    return LRESULT{0};
   }
 
-  return ::DefWindowProc(hwnd, message, wParam, lParam);
+  if (!native_video_window_manager_ ||
+      !native_video_window_manager_->HasWindows()) {
+    return std::nullopt;
+  }
+
+  if (message == WM_WINDOWPOSCHANGING && lparam) {
+    native_video_window_manager_->SyncAllForHostWindowPos(
+        *reinterpret_cast<WINDOWPOS*>(lparam));
+  }
+
+  switch (message) {
+    case WM_ACTIVATE:
+    case WM_DPICHANGED:
+    case WM_EXITSIZEMOVE:
+    case WM_MOVE:
+    case WM_SHOWWINDOW:
+    case WM_SIZE:
+    case WM_WINDOWPOSCHANGED:
+      // The runner updates its Flutter child view after plugin delegates have
+      // returned. Defer the final repair so resize and fullscreen transitions
+      // use the settled client bounds.
+      ScheduleNativeWindowSync();
+      break;
+  }
+  return std::nullopt;
+}
+
+void MediaKitVideoPlugin::ScheduleNativeWindowSync() {
+  if (!flutter_window_ || native_window_sync_pending_) return;
+  native_window_sync_pending_ = true;
+  if (!::PostMessage(flutter_window_, kNativeWindowSyncMessage, 0, 0)) {
+    native_window_sync_pending_ = false;
+  }
 }
 
 void MediaKitVideoPlugin::ProcessMainThreadTasks() {
@@ -103,7 +148,39 @@ void MediaKitVideoPlugin::ProcessMainThreadTasks() {
 void MediaKitVideoPlugin::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& method_call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  if (method_call.method_name().compare("VideoOutputManager.Create") == 0) {
+  if (method_call.method_name().compare("NativeVideoWindow.Create") == 0) {
+    const auto& arguments =
+        std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto handle = std::get<std::string>(
+        arguments.at(flutter::EncodableValue("handle")));
+    const int64_t handle_value = std::stoll(handle);
+    const HWND window = native_video_window_manager_->Create(handle_value);
+    result->Success(flutter::EncodableValue(
+        static_cast<int64_t>(reinterpret_cast<intptr_t>(window))));
+  } else if (method_call.method_name().compare(
+                 "NativeVideoWindow.SetBounds") == 0) {
+    const auto& arguments =
+        std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto handle = std::get<std::string>(
+        arguments.at(flutter::EncodableValue("handle")));
+    const int status = native_video_window_manager_->SetBounds(
+        std::stoll(handle),
+        std::get<double>(arguments.at(flutter::EncodableValue("x"))),
+        std::get<double>(arguments.at(flutter::EncodableValue("y"))),
+        std::get<double>(arguments.at(flutter::EncodableValue("width"))),
+        std::get<double>(arguments.at(flutter::EncodableValue("height"))),
+        std::get<bool>(arguments.at(flutter::EncodableValue("visible"))));
+    result->Success(flutter::EncodableValue(status));
+  } else if (method_call.method_name().compare("NativeVideoWindow.Dispose") ==
+             0) {
+    const auto& arguments =
+        std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto handle = std::get<std::string>(
+        arguments.at(flutter::EncodableValue("handle")));
+    native_video_window_manager_->Dispose(std::stoll(handle));
+    result->Success(flutter::EncodableValue(std::monostate{}));
+  } else if (method_call.method_name().compare("VideoOutputManager.Create") ==
+             0) {
     auto arguments = std::get<flutter::EncodableMap>(*method_call.arguments());
     auto handle =
         std::get<std::string>(arguments[flutter::EncodableValue("handle")]);

@@ -28,6 +28,10 @@ abstract class PlatformVideoController {
   /// User defined configuration for [VideoController].
   final VideoControllerConfiguration configuration;
 
+  /// Whether this controller presents video through a native top-level window
+  /// instead of a Flutter texture.
+  bool get usesNativeWindow => false;
+
   /// Texture ID of the video output, registered with Flutter engine by the native implementation.
   final ValueNotifier<int?> id = ValueNotifier<int?>(null);
 
@@ -50,6 +54,12 @@ abstract class PlatformVideoController {
     int? width,
     int? height,
   });
+
+  /// Updates the native video plane bounds in Flutter logical coordinates.
+  /// Texture-backed implementations intentionally ignore this operation.
+  Future<void> setNativeWindowBounds(Rect bounds, {required bool visible}) {
+    return Future<void>.value();
+  }
 
   /// A [Future] that completes when the first video frame has been rendered.
   Future<void> get waitUntilFirstFrameRendered =>
@@ -120,6 +130,17 @@ class VideoControllerConfiguration {
   /// Default: Platform specific.
   final String? renderBackend;
 
+  /// Presents video through a native window on supported desktop platforms.
+  ///
+  /// Default: `false`.
+  final bool useNativeWindow;
+
+  /// Stable key used by the Windows plugin to own a pre-created native window.
+  final int? nativeWindowKey;
+
+  /// HWND allocated before libmpv initialization.
+  final Future<int>? nativeWindowHandle;
+
   /// Whether to attach `android.view.Surface` after video parameters are known.
   ///
   /// Default:
@@ -136,6 +157,9 @@ class VideoControllerConfiguration {
     this.scale = 1.0,
     this.enableHardwareAcceleration = true,
     this.renderBackend,
+    this.useNativeWindow = false,
+    this.nativeWindowKey,
+    this.nativeWindowHandle,
     this.androidAttachSurfaceAfterVideoParameters,
   });
 
@@ -148,6 +172,9 @@ class VideoControllerConfiguration {
     int? height,
     bool? enableHardwareAcceleration,
     String? renderBackend,
+    bool? useNativeWindow,
+    int? nativeWindowKey,
+    Future<int>? nativeWindowHandle,
     bool? androidAttachSurfaceAfterVideoParameters,
   }) =>
       VideoControllerConfiguration(
@@ -159,6 +186,9 @@ class VideoControllerConfiguration {
         enableHardwareAcceleration:
             enableHardwareAcceleration ?? this.enableHardwareAcceleration,
         renderBackend: renderBackend ?? this.renderBackend,
+        useNativeWindow: useNativeWindow ?? this.useNativeWindow,
+        nativeWindowKey: nativeWindowKey ?? this.nativeWindowKey,
+        nativeWindowHandle: nativeWindowHandle ?? this.nativeWindowHandle,
         androidAttachSurfaceAfterVideoParameters:
             androidAttachSurfaceAfterVideoParameters ??
                 this.androidAttachSurfaceAfterVideoParameters,

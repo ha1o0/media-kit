@@ -32,6 +32,7 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
     "mailbox_swap_chain.cc"
     "media_kit_video_plugin_c_api.cc"
     "media_kit_video_plugin.cc"
+    "native_video_window_manager.cc"
     "video_output_manager.cc"
     "video_output.cc"
     "utils.cc"
