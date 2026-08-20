@@ -28,9 +28,6 @@ Future<void> enterFullscreen(BuildContext context) {
             videoViewParametersNotifier(context);
         final controllerValue = controller(context);
         final renderTexture = stateValue.widget.renderTexture;
-        // A native Video uses one shared HWND. Keep the original route from
-        // publishing its old bounds while the fullscreen copy is mounted.
-        stateValue.setNativeFullscreenRouteActive(true);
         Navigator.of(context, rootNavigator: true).push(
           PageRouteBuilder(
             pageBuilder: (_, __, ___) => ColoredBox(
@@ -108,6 +105,13 @@ Future<void> enterFullscreen(BuildContext context) {
         // can make it observe the previous viewport while a texture is active.
         if (defaultTargetPlatform == TargetPlatform.windows) {
           await WidgetsBinding.instance.endOfFrame;
+          if (!renderTexture) {
+            // Keep the source viewport active until the fullscreen route has
+            // completed layout, then transfer the single native HWND without
+            // leaving an unowned frame between the two routes.
+            stateValue.setNativeFullscreenRouteActive(true);
+            await WidgetsBinding.instance.endOfFrame;
+          }
         }
         await onEnterFullscreenCallback();
       }
@@ -121,8 +125,10 @@ Future<void> exitFullscreen(BuildContext context) {
     if (isFullscreen(context)) {
       if (context.mounted) {
         final parent = FullscreenInheritedWidget.of(context).parent;
-        await Navigator.of(context).maybePop();
+        // Transfer native HWND ownership back before removing the fullscreen
+        // route so the source viewport is ready for the windowed resize.
         parent.setNativeFullscreenRouteActive(false);
+        await Navigator.of(context).maybePop();
         // It is known that this [context] will have a [FullscreenInheritedWidget] above it.
         if (context.mounted) parent.refreshView();
       }

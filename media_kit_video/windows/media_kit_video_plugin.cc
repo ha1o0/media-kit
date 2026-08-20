@@ -39,8 +39,7 @@ MediaKitVideoPlugin::MediaKitVideoPlugin(
       native_video_window_manager_(
           std::make_unique<NativeVideoWindowManager>(registrar)),
       video_output_manager_(std::make_unique<VideoOutputManager>(registrar)) {
-  flutter_window_ =
-      ::GetAncestor(registrar->GetView()->GetNativeWindow(), GA_ROOT);
+  RefreshFlutterWindow();
   window_proc_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
       [this](HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         return HandleWindowProc(hwnd, message, wparam, lparam);
@@ -61,6 +60,7 @@ MediaKitVideoPlugin::~MediaKitVideoPlugin() {
 }
 
 void MediaKitVideoPlugin::RunOnMainThread(std::function<void()> task) {
+  RefreshFlutterWindow();
   if (!flutter_window_) {
     return;
   }
@@ -71,6 +71,13 @@ void MediaKitVideoPlugin::RunOnMainThread(std::function<void()> task) {
   }
 
   ::PostMessage(flutter_window_, kMainThreadTaskMessage, 0, 0);
+}
+
+void MediaKitVideoPlugin::RefreshFlutterWindow() {
+  const auto view = registrar_ ? registrar_->GetView() : nullptr;
+  const HWND view_window = view ? view->GetNativeWindow() : nullptr;
+  const HWND root = view_window ? ::GetAncestor(view_window, GA_ROOT) : nullptr;
+  if (root) flutter_window_ = root;
 }
 
 std::optional<LRESULT> MediaKitVideoPlugin::HandleWindowProc(
@@ -119,6 +126,7 @@ std::optional<LRESULT> MediaKitVideoPlugin::HandleWindowProc(
 }
 
 void MediaKitVideoPlugin::ScheduleNativeWindowSync() {
+  RefreshFlutterWindow();
   if (!flutter_window_ || native_window_sync_pending_) return;
   native_window_sync_pending_ = true;
   if (!::PostMessage(flutter_window_, kNativeWindowSyncMessage, 0, 0)) {

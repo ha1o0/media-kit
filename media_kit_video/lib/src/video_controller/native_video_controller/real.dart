@@ -8,6 +8,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart' show BoxFit;
 import 'package:synchronized/synchronized.dart';
 
 import 'package:media_kit/media_kit.dart';
@@ -57,6 +58,10 @@ class NativeVideoController extends PlatformVideoController {
       configuration.useNativeWindow && Platform.isWindows;
 
   int? nativeWindowHandle;
+  BoxFit? _nativeWindowFit;
+  String? _nativeWindowKeepAspect;
+  String? _nativeWindowPanscan;
+  final Lock _nativeWindowFitLock = Lock();
 
   Future<void> setProperty(String key, String value) async {
     await platform.setProperty(key, value, waitForInitialization: false);
@@ -68,6 +73,56 @@ class NativeVideoController extends PlatformVideoController {
       await setProperty(entry.key, entry.value);
     }
   }
+
+  @override
+  Future<void> setNativeWindowFit(BoxFit fit) =>
+      _nativeWindowFitLock.synchronized(() async {
+        if (!usesNativeWindow || _nativeWindowFit == fit) return;
+
+        late final String keepAspect;
+        late final String panscan;
+        switch (fit) {
+          case BoxFit.fill:
+            keepAspect = 'no';
+            panscan = '0';
+            break;
+          case BoxFit.cover:
+            keepAspect = 'yes';
+            panscan = '1';
+            break;
+          case BoxFit.contain:
+          case BoxFit.fitWidth:
+          case BoxFit.fitHeight:
+          case BoxFit.none:
+          case BoxFit.scaleDown:
+            keepAspect = 'yes';
+            panscan = '0';
+            break;
+        }
+
+        // mpv may reconfigure the video output when either option changes.
+        // Skip unchanged values so contain <-> cover only updates panscan.
+        if (fit == BoxFit.fill) {
+          if (_nativeWindowPanscan != panscan) {
+            await setProperty('panscan', panscan);
+            _nativeWindowPanscan = panscan;
+          }
+          if (_nativeWindowKeepAspect != keepAspect) {
+            await setProperty('keepaspect', keepAspect);
+            _nativeWindowKeepAspect = keepAspect;
+          }
+        } else {
+          if (_nativeWindowKeepAspect != keepAspect) {
+            await setProperty('keepaspect', keepAspect);
+            _nativeWindowKeepAspect = keepAspect;
+          }
+          if (_nativeWindowPanscan != panscan) {
+            await setProperty('panscan', panscan);
+            _nativeWindowPanscan = panscan;
+          }
+        }
+        _nativeWindowFit = fit;
+      });
 
   /// [StreamSubscription] for listening to video [Rect].
   StreamSubscription<VideoParams>? videoParamsSubscription;

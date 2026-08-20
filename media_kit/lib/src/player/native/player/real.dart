@@ -2398,9 +2398,9 @@ class NativePlayer extends PlatformPlayer {
           'audiounit-skip-session-management': 'yes',
       };
 
-      final preInitOptions = await configuration.preInitOptionsBuilder?.call();
-      if (preInitOptions != null) {
-        options.addAll(preInitOptions);
+      final preInitOptionsBuilder = configuration.preInitOptionsBuilder;
+      if (preInitOptionsBuilder != null) {
+        options.addAll(await preInitOptionsBuilder());
       }
 
       if (Platform.isAndroid &&

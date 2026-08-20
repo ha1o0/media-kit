@@ -261,6 +261,18 @@ LRESULT CALLBACK NativeVideoWindowManager::WindowProc(HWND window,
                                                        UINT message,
                                                        WPARAM wparam,
                                                        LPARAM lparam) {
+  if (message == WM_WINDOWPOSCHANGING && lparam) {
+    auto* position = reinterpret_cast<WINDOWPOS*>(lparam);
+    if ((position->flags & SWP_NOSIZE) == 0) {
+      // Do not let DWM preserve and stretch the previous client image while
+      // mpv is resizing its swap chain. gpu-next will present a correctly
+      // fitted replacement frame immediately after WM_SIZE.
+      position->flags |= SWP_NOCOPYBITS;
+    }
+  }
+  if (message == WM_SIZE) {
+    ::InvalidateRect(window, nullptr, FALSE);
+  }
   if (message == WM_TIMER && wparam == kNativeVideoResyncTimer) {
     auto* manager = g_native_video_window_manager;
     if (manager) {

@@ -174,13 +174,18 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   bool _pauseDueToPauseUponEnteringBackgroundMode = false;
   bool _nativeWindowSyncScheduled = false;
+  BoxFit? _lastNativeWindowFit;
   bool _tickerModeEnabled = true;
   // The source Video remains mounted while media-kit's fullscreen route is
   // pushed.  A native HWND is a single shared resource, so the source must
   // stop publishing its old viewport while the fullscreen copy owns it.
   bool _nativeFullscreenRouteActive = false;
+  VideoState? _nativeFullscreenParent;
+  final ValueNotifier<int> _nativeFullscreenOwnershipRevision =
+      ValueNotifier<int>(0);
   Rect? _lastNativeWindowBounds;
   bool? _lastNativeWindowVisible;
+  bool _platformControllerListenerAttached = false;
   // Public API:
   bool isFullscreen() {
     final context = _contextNotifier.value;
@@ -277,6 +282,17 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
               context,
             )?.disposeNotifiers ??
             true;
+    final nativeFullscreenParent = !widget.renderTexture
+        ? media_kit_video_controls.FullscreenInheritedWidget.maybeOf(context)
+            ?.parent
+        : null;
+    if (!identical(_nativeFullscreenParent, nativeFullscreenParent)) {
+      _nativeFullscreenParent?._nativeFullscreenOwnershipRevision
+          .removeListener(_handleNativeFullscreenOwnershipChanged);
+      _nativeFullscreenParent = nativeFullscreenParent;
+      _nativeFullscreenParent?._nativeFullscreenOwnershipRevision
+          .addListener(_handleNativeFullscreenOwnershipChanged);
+    }
     super.didChangeDependencies();
     if (!widget.renderTexture && tickerModeChanged) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -288,6 +304,23 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   @override
   void didUpdateWidget(Video oldWidget) {
     super.didUpdateWidget(oldWidget);
+
+    if (!identical(widget.controller, oldWidget.controller)) {
+      _detachPlatformControllerListener(oldWidget.controller);
+      _attachPlatformControllerListener();
+      _lastNativeWindowFit = null;
+      _handlePlatformControllerChanged();
+    } else if (!widget.renderTexture && widget.fit != oldWidget.fit) {
+      _syncNativeWindowFit(widget.fit);
+    }
+    if (widget.renderTexture != oldWidget.renderTexture) {
+      if (widget.renderTexture) {
+        _detachPlatformControllerListener(widget.controller);
+      } else {
+        _attachPlatformControllerListener();
+        _handlePlatformControllerChanged();
+      }
+    }
 
     if (widget.renderTexture != oldWidget.renderTexture ||
         widget.nativeWindowVisible != oldWidget.nativeWindowVisible) {
@@ -370,6 +403,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _attachPlatformControllerListener();
+    _handlePlatformControllerChanged();
     // --------------------------------------------------
     // Do not show the video frame until width & height are available.
     // Since [ValueNotifier<Rect?>] inside [VideoController] only gets updated by the render loop (i.e. it will not fire when video's width & height are not available etc.), it's important to handle this separately here.
@@ -436,6 +471,10 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _nativeFullscreenParent?._nativeFullscreenOwnershipRevision
+        .removeListener(_handleNativeFullscreenOwnershipChanged);
+    _nativeFullscreenOwnershipRevision.dispose();
+    _detachPlatformControllerListener(widget.controller);
     _wakelock.disable();
     for (final subscription in _subscriptions) {
       subscription.cancel();
@@ -449,6 +488,46 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  void _handlePlatformControllerChanged() {
+    if (!widget.renderTexture) {
+      _syncNativeWindowFit(widget.fit);
+    }
+  }
+
+  void _attachPlatformControllerListener() {
+    if (widget.renderTexture || _platformControllerListenerAttached) return;
+    widget.controller.notifier.addListener(_handlePlatformControllerChanged);
+    _platformControllerListenerAttached = true;
+  }
+
+  void _detachPlatformControllerListener(VideoController controller) {
+    if (!_platformControllerListenerAttached) return;
+    controller.notifier.removeListener(_handlePlatformControllerChanged);
+    _platformControllerListenerAttached = false;
+  }
+
+  void _handleNativeFullscreenOwnershipChanged() {
+    _forceNativeWindowSync();
+  }
+
+  void _syncNativeWindowFit(BoxFit fit) {
+    final platform = widget.controller.notifier.value;
+    if (platform == null || !platform.usesNativeWindow) return;
+    if (_lastNativeWindowFit == fit) return;
+    _lastNativeWindowFit = fit;
+    unawaited(
+      platform.setNativeWindowFit(fit).catchError(
+        (Object error, StackTrace stackTrace) {
+          _lastNativeWindowFit = null;
+          debugPrint(
+            'Video: failed to apply native window fit: '
+            '$error\n$stackTrace',
+          );
+        },
+      ),
+    );
+  }
+
   void refreshView() {}
 
   /// Transfers native-window layout ownership to/from media-kit's fullscreen
@@ -458,9 +537,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
       return;
     }
     _nativeFullscreenRouteActive = active;
-    if (!active) {
-      _forceNativeWindowSync();
-    }
+    _nativeFullscreenOwnershipRevision.value++;
+    _forceNativeWindowSync();
   }
 
   bool get nativeFullscreenRouteActive => _nativeFullscreenRouteActive;

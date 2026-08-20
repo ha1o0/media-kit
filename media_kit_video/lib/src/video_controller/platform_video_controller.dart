@@ -61,6 +61,12 @@ abstract class PlatformVideoController {
     return Future<void>.value();
   }
 
+  /// Applies Flutter's fit semantics to a native video window.
+  /// Texture-backed implementations intentionally ignore this operation.
+  Future<void> setNativeWindowFit(BoxFit fit) {
+    return Future<void>.value();
+  }
+
   /// A [Future] that completes when the first video frame has been rendered.
   Future<void> get waitUntilFirstFrameRendered =>
       waitUntilFirstFrameRenderedCompleter.future;

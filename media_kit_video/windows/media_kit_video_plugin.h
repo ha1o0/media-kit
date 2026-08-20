@@ -42,6 +42,7 @@ class MediaKitVideoPlugin : public flutter::Plugin {
                                           UINT message,
                                           WPARAM wparam,
                                           LPARAM lparam);
+  void RefreshFlutterWindow();
   void ScheduleNativeWindowSync();
   void ProcessMainThreadTasks();
   

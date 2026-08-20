@@ -124,6 +124,9 @@ class Video extends StatefulWidget {
   /// its HTML video element.
   final bool renderTexture;
 
+  /// Kept for API parity with native platforms. Web has no native video HWND.
+  final bool nativeWindowVisible;
+
   /// {@macro video}
   const Video({
     super.key,
@@ -146,6 +149,7 @@ class Video extends StatefulWidget {
     this.onExitFullscreen = defaultExitNativeFullscreen,
     this.focusNode,
     this.renderTexture = true,
+    this.nativeWindowVisible = true,
   });
 
   @override
