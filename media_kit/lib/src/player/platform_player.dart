@@ -479,6 +479,15 @@ class PlayerConfiguration {
   /// Default: `true`.
   final bool async;
 
+  /// Whether public native `getProperty` & `setProperty` calls use libmpv's
+  /// asynchronous request APIs.
+  ///
+  /// This is separate from [async] to preserve the existing public property
+  /// access behavior unless an embedder explicitly opts in.
+  ///
+  /// Default: `false`.
+  final bool asyncPropertyAccess;
+
   /// Whether to use [libass](https://github.com/libass/libass) based subtitle rendering for native backend.
   ///
   /// By default, subtitles rendering is Flutter `Widget` based.
@@ -559,6 +568,7 @@ class PlayerConfiguration {
     this.ready,
     this.muted = false,
     this.async = true,
+    this.asyncPropertyAccess = false,
     this.libass = false,
     this.libassAndroidFont,
     this.libassAndroidFontName,

@@ -1247,6 +1247,16 @@ class NativePlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
     }
 
+    if (configuration.asyncPropertyAccess) {
+      await _setPropertyString(
+        property,
+        value,
+        forceAsync: true,
+        reportErrors: false,
+      );
+      return;
+    }
+
     final name = property.toNativeUtf8();
     final data = value.toNativeUtf8();
     mpv.mpv_set_property_string(
@@ -1278,11 +1288,15 @@ class NativePlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
     }
 
+    if (configuration.asyncPropertyAccess) {
+      return _getPropertyStringAsync(property);
+    }
+
     final name = property.toNativeUtf8();
     final value = mpv.mpv_get_property_string(ctx, name.cast());
+    calloc.free(name);
     if (value != nullptr) {
       final result = value.cast<Utf8>().toDartString();
-      calloc.free(name);
       mpv.mpv_free(value.cast());
 
       return result;
@@ -1519,6 +1533,27 @@ class NativePlayer extends PlatformPlayer {
         completer.complete(event.ref.error);
       }
     }
+    if (event.ref.event_id ==
+        generated.mpv_event_id.MPV_EVENT_GET_PROPERTY_REPLY) {
+      final completer = _getPropertyRequests.remove(event.ref.reply_userdata);
+      if (completer == null) {
+        print(
+            'Warning: Received MPV_EVENT_GET_PROPERTY_REPLY with unregistered ID ${event.ref.reply_userdata}');
+      } else {
+        String value = '';
+        if (event.ref.error >= 0 && event.ref.data != nullptr) {
+          final prop = event.ref.data.cast<generated.mpv_event_property>();
+          if (prop.ref.format == generated.mpv_format.MPV_FORMAT_STRING &&
+              prop.ref.data != nullptr) {
+            final data = prop.ref.data.cast<Pointer<Utf8>>().value;
+            if (data != nullptr) {
+              value = data.toDartString();
+            }
+          }
+        }
+        completer.complete(value);
+      }
+    }
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_COMMAND_REPLY) {
       final completer = _commandRequests.remove(event.ref.reply_userdata);
       if (completer == null) {
@@ -1544,10 +1579,17 @@ class NativePlayer extends PlatformPlayer {
       return;
     }
 
-    _logError(
-      event.ref.error,
-      'event:${event.ref.event_id} ${event.ref.data.cast<Uint8>()}',
-    );
+    final eventId = event.ref.event_id;
+    final isAsyncReply =
+        eventId == generated.mpv_event_id.MPV_EVENT_GET_PROPERTY_REPLY ||
+            eventId == generated.mpv_event_id.MPV_EVENT_SET_PROPERTY_REPLY ||
+            eventId == generated.mpv_event_id.MPV_EVENT_COMMAND_REPLY;
+    if (!isAsyncReply) {
+      _logError(
+        event.ref.error,
+        'event:$eventId ${event.ref.data.cast<Uint8>()}',
+      );
+    }
 
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_START_FILE) {
       if (isPlayingStateChangeAllowed) {
@@ -2615,14 +2657,39 @@ class NativePlayer extends PlatformPlayer {
   }
 
   int _asyncRequestNumber = 0;
+  final Map<int, Completer<String>> _getPropertyRequests = {};
   final Map<int, Completer<int>> _setPropertyRequests = {};
   final Map<int, Completer<int>> _commandRequests = {};
 
-  Future<void> _setProperty(String name, int format, Pointer<Void> data) async {
+  Future<String> _getPropertyStringAsync(String name) async {
     final requestNumber = _asyncRequestNumber++;
-    final completer = _setPropertyRequests[requestNumber] = Completer<int>();
+    final completer = _getPropertyRequests[requestNumber] = Completer<String>();
     final namePtr = name.toNativeUtf8();
-    if (configuration.async) {
+    final immediate = mpv.mpv_get_property_async(
+      ctx,
+      requestNumber,
+      namePtr.cast(),
+      generated.mpv_format.MPV_FORMAT_STRING,
+    );
+    calloc.free(namePtr);
+    if (immediate < 0) {
+      _getPropertyRequests.remove(requestNumber);
+      return '';
+    }
+    return completer.future;
+  }
+
+  Future<void> _setProperty(
+    String name,
+    int format,
+    Pointer<Void> data, {
+    bool forceAsync = false,
+    bool reportErrors = true,
+  }) async {
+    final requestNumber = _asyncRequestNumber++;
+    final namePtr = name.toNativeUtf8();
+    if (configuration.async || forceAsync) {
+      final completer = _setPropertyRequests[requestNumber] = Completer<int>();
       final immediate = mpv.mpv_set_property_async(
         ctx,
         requestNumber,
@@ -2633,10 +2700,17 @@ class NativePlayer extends PlatformPlayer {
       final text = '_setProperty($name, $format)';
       if (immediate < 0) {
         // Sending failed.
-        _logError(immediate, text);
+        _setPropertyRequests.remove(requestNumber);
+        calloc.free(namePtr);
+        if (reportErrors) {
+          _logError(immediate, text);
+        }
         return;
       }
-      _logError(await completer.future, text);
+      final result = await completer.future;
+      if (reportErrors) {
+        _logError(result, text);
+      }
     } else {
       mpv.mpv_set_property(
         ctx,
@@ -2678,7 +2752,12 @@ class NativePlayer extends PlatformPlayer {
     calloc.free(ptr);
   }
 
-  Future<void> _setPropertyString(String name, String value) async {
+  Future<void> _setPropertyString(
+    String name,
+    String value, {
+    bool forceAsync = false,
+    bool reportErrors = true,
+  }) async {
     final string = value.toNativeUtf8();
     // API requires char**.
     final ptr = calloc<Pointer<Void>>(1);
@@ -2687,6 +2766,8 @@ class NativePlayer extends PlatformPlayer {
       name,
       generated.mpv_format.MPV_FORMAT_STRING,
       ptr.cast(),
+      forceAsync: forceAsync,
+      reportErrors: reportErrors,
     );
     calloc.free(ptr);
     calloc.free(string);
@@ -2706,7 +2787,10 @@ class NativePlayer extends PlatformPlayer {
       final text = '_command(${args.join(', ')})';
       if (immediate < 0) {
         // Sending failed.
+        _commandRequests.remove(requestNumber);
         _logError(immediate, text);
+        calloc.free(arr);
+        pointers.forEach(calloc.free);
         return;
       }
       _logError(await completer.future, text);
