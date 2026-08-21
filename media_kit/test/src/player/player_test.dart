@@ -14,6 +14,7 @@ import 'package:media_kit/src/models/audio_device.dart';
 import 'package:media_kit/src/models/audio_params.dart';
 import 'package:media_kit/src/models/video_params.dart';
 import 'package:media_kit/src/models/playlist_mode.dart';
+import 'package:media_kit/src/models/player_log.dart';
 
 import 'package:media_kit/src/media_kit.dart';
 import 'package:media_kit/src/player/player.dart';
@@ -3961,6 +3962,74 @@ Lorem ipsum dolor sit amet, consectetur adipiscing elit.
 
       // VOLUNTARY DELAY.
       await Future.delayed(const Duration(seconds: 5));
+
+      await player.dispose();
+    },
+    skip: UniversalPlatform.isWeb,
+  );
+  test(
+    'player-native-player-async-property-access',
+    () async {
+      final player = Player(
+        configuration: const PlayerConfiguration(
+          asyncPropertyAccess: true,
+        ),
+      );
+
+      expect(player.platform, isA<NativePlayer>());
+
+      final platform = player.platform as dynamic;
+      await platform.setProperty('volume', '69.0');
+      final value = await platform.getProperty('volume') as String;
+
+      expect(double.parse(value), 69.0);
+
+      final errorLogs = <PlayerLog>[];
+      final subscription = player.stream.log.listen((log) {
+        if (log.level == 'error') {
+          errorLogs.add(log);
+        }
+      });
+      expect(
+        await platform.getProperty('media-kit-missing-property'),
+        isEmpty,
+      );
+      await platform.setProperty('media-kit-missing-property', 'value');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(
+        errorLogs.where(
+          (log) =>
+              log.text.contains('_getPropertyStringAsync') ||
+              log.text.contains('_setProperty(media-kit-missing-property') ||
+              log.text.contains('event:3') ||
+              log.text.contains('event:4'),
+        ),
+        isEmpty,
+      );
+
+      final shaderPath = '${Directory.systemTemp.path}'
+          '${Platform.pathSeparator}media-kit-anime4k-test.glsl';
+      await platform.command([
+        'change-list',
+        'glsl-shaders',
+        'append',
+        shaderPath,
+      ]);
+      expect(
+        await platform.getProperty('glsl-shaders'),
+        contains(shaderPath),
+      );
+      await platform.command([
+        'change-list',
+        'glsl-shaders',
+        'remove',
+        shaderPath,
+      ]);
+      expect(
+        await platform.getProperty('glsl-shaders'),
+        isNot(contains(shaderPath)),
+      );
+      await subscription.cancel();
 
       await player.dispose();
     },
