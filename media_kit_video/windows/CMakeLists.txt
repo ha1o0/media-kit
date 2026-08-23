@@ -64,6 +64,7 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
     "${LIBMPV_SRC}/libmpv.dll.a"
     d3d11
     d3dcompiler
+    dwmapi
     dxgi
   )
 else()

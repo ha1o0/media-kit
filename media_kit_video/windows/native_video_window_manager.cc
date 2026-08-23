@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <dwmapi.h>
 
 namespace media_kit_video {
 namespace {
@@ -19,6 +20,12 @@ constexpr UINT kNativeVideoResyncIntervalMs = 250;
 // Window effects and gpu-next may finish reconfiguring several seconds after
 // the first frame. Keep the low-frequency guard alive only during startup.
 constexpr ULONGLONG kNativeVideoResyncDurationMs = 10000;
+// Use numeric values so the plugin still builds with Windows SDKs older than
+// 10.0.22000.0. Unsupported systems simply ignore the DWM attribute.
+constexpr auto kDwmWindowCornerPreference =
+    static_cast<DWMWINDOWATTRIBUTE>(33);
+constexpr int kDwmDoNotRound = 1;
+constexpr int kDwmRound = 2;
 
 NativeVideoWindowManager* g_native_video_window_manager = nullptr;
 
@@ -32,6 +39,34 @@ double ScaleForWindow(HWND window) {
                                       : nullptr;
   const UINT dpi = get_dpi_for_window ? get_dpi_for_window(window) : 96;
   return std::max(1U, dpi) / 96.0;
+}
+
+bool CoversMonitor(HWND window) {
+  RECT window_rect{};
+  if (!window || !::GetWindowRect(window, &window_rect)) return false;
+
+  MONITORINFO monitor_info{};
+  monitor_info.cbSize = sizeof(monitor_info);
+  const HMONITOR monitor =
+      ::MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+  if (!monitor || !::GetMonitorInfoW(monitor, &monitor_info)) return false;
+
+  const RECT& monitor_rect = monitor_info.rcMonitor;
+  return window_rect.left <= monitor_rect.left &&
+         window_rect.top <= monitor_rect.top &&
+         window_rect.right >= monitor_rect.right &&
+         window_rect.bottom >= monitor_rect.bottom;
+}
+
+bool IsArranged(HWND window) {
+  using IsWindowArrangedProc = BOOL(WINAPI*)(HWND);
+  static const IsWindowArrangedProc is_window_arranged = [] {
+    const auto user32 = ::GetModuleHandleW(L"user32.dll");
+    return user32 ? reinterpret_cast<IsWindowArrangedProc>(
+                        ::GetProcAddress(user32, "IsWindowArranged"))
+                  : nullptr;
+  }();
+  return is_window_arranged && is_window_arranged(window);
 }
 
 }  // namespace
@@ -134,6 +169,26 @@ void NativeVideoWindowManager::RefreshFlutterWindow() {
   if (root) flutter_window_ = root;
 }
 
+void NativeVideoWindowManager::UpdateCornerPreference(Entry& entry) {
+  if (!entry.window || !flutter_window_) return;
+
+  // The native video HWND is an independent WS_POPUP, so it does not inherit
+  // the rounded DWM clip of the transparent Flutter host. Match the host while
+  // windowed, but keep arranged, maximized, and fullscreen playback flush to
+  // the screen.
+  const bool suppress_rounding =
+      IsArranged(flutter_window_) || ::IsZoomed(flutter_window_) ||
+      CoversMonitor(flutter_window_);
+  const int preference = suppress_rounding ? kDwmDoNotRound : kDwmRound;
+  if (entry.corner_preference == preference) return;
+
+  ::DwmSetWindowAttribute(entry.window, kDwmWindowCornerPreference,
+                          &preference, sizeof(preference));
+  // Cache attempted values too. Older Windows versions reject attribute 33;
+  // retry only if the host state changes instead of on every bounds sync.
+  entry.corner_preference = preference;
+}
+
 int NativeVideoWindowManager::SetBounds(int64_t handle,
                                         double x,
                                         double y,
@@ -230,6 +285,7 @@ int NativeVideoWindowManager::Sync(Entry& entry) {
   }
   const auto view = registrar_ ? registrar_->GetView() : nullptr;
   RefreshFlutterWindow();
+  UpdateCornerPreference(entry);
   const HWND flutter_view = view ? view->GetNativeWindow() : nullptr;
   int status = 1;
   if (entry.visible) status |= 1 << 1;

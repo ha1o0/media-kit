@@ -47,6 +47,7 @@ class NativeVideoWindowManager {
     double height = 0.0;
     bool visible = false;
     bool video_above_flutter = false;
+    int corner_preference = -1;
     ULONGLONG resync_deadline = 0;
     bool syncing = false;
   };
@@ -54,6 +55,7 @@ class NativeVideoWindowManager {
   bool EnsureWindowClass();
   void ScheduleResync(Entry& entry);
   void RefreshFlutterWindow();
+  void UpdateCornerPreference(Entry& entry);
   int Sync(Entry& entry);
   static LRESULT CALLBACK WindowProc(HWND window,
                                      UINT message,
