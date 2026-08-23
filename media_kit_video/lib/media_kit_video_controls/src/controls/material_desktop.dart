@@ -272,6 +272,10 @@ class MaterialDesktopVideoControlsThemeData {
   /// [Duration] for which the controls will be animated when shown or hidden.
   final Duration controlsTransitionDuration;
 
+  /// Restricts controls opacity animations to the painted top, center and
+  /// bottom chrome instead of allocating one full-video opacity layer.
+  final bool useBoundedControlsOpacityLayers;
+
   /// Builder for the buffering indicator.
   final Widget Function(BuildContext)? bufferingIndicatorBuilder;
 
@@ -403,6 +407,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.padding,
     this.controlsHoverDuration = const Duration(seconds: 3),
     this.controlsTransitionDuration = const Duration(milliseconds: 150),
+    this.useBoundedControlsOpacityLayers = false,
     this.bufferingIndicatorBuilder,
     this.primaryButtonBar = const [],
     this.topButtonBar = const [],
@@ -462,6 +467,7 @@ class MaterialDesktopVideoControlsThemeData {
     bool? hideMouseOnControlsRemoval,
     Duration? controlsHoverDuration,
     Duration? controlsTransitionDuration,
+    bool? useBoundedControlsOpacityLayers,
     Widget Function(BuildContext)? bufferingIndicatorBuilder,
     List<Widget>? topButtonBar,
     EdgeInsets? topButtonBarMargin,
@@ -519,6 +525,8 @@ class MaterialDesktopVideoControlsThemeData {
           bufferingIndicatorBuilder ?? this.bufferingIndicatorBuilder,
       controlsTransitionDuration:
           controlsTransitionDuration ?? this.controlsTransitionDuration,
+      useBoundedControlsOpacityLayers: useBoundedControlsOpacityLayers ??
+          this.useBoundedControlsOpacityLayers,
       topButtonBar: topButtonBar ?? this.topButtonBar,
       topButtonBarMargin: topButtonBarMargin ?? this.topButtonBarMargin,
       bottomButtonBar: bottomButtonBar ?? this.bottomButtonBar,
@@ -728,7 +736,9 @@ class _MaterialDesktopVideoControlsState
       return;
     }
     _lastHoverHandledAt = now;
-    shiftSubtitle();
+    // The subtitle offset is applied once when the controls transition from
+    // hidden to visible. Reapplying the same padding while the controls are
+    // already visible only invalidates layout on repeated pointer movement.
     _scheduleAutoHide();
   }
 
@@ -818,23 +828,23 @@ class _MaterialDesktopVideoControlsState
               const SingleActivator(LogicalKeyboardKey.space): () =>
                   _adapter(context).playOrPause(),
               const SingleActivator(LogicalKeyboardKey.keyJ): () {
-                final rate = _adapter(context).position -
-                    const Duration(seconds: 10);
+                final rate =
+                    _adapter(context).position - const Duration(seconds: 10);
                 _adapter(context).seek(rate);
               },
               const SingleActivator(LogicalKeyboardKey.keyI): () {
-                final rate = _adapter(context).position +
-                    const Duration(seconds: 10);
+                final rate =
+                    _adapter(context).position + const Duration(seconds: 10);
                 _adapter(context).seek(rate);
               },
               const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
-                final rate = _adapter(context).position -
-                    const Duration(seconds: 2);
+                final rate =
+                    _adapter(context).position - const Duration(seconds: 2);
                 _adapter(context).seek(rate);
               },
               const SingleActivator(LogicalKeyboardKey.arrowRight): () {
-                final rate = _adapter(context).position +
-                    const Duration(seconds: 2);
+                final rate =
+                    _adapter(context).position + const Duration(seconds: 2);
                 _adapter(context).seek(rate);
               },
               const SingleActivator(LogicalKeyboardKey.arrowUp): () {
@@ -935,134 +945,91 @@ class _MaterialDesktopVideoControlsState
                     onExit: (_) => onExit(),
                     child: Stack(
                       children: [
-                        AnimatedOpacity(
-                          curve: Curves.easeInOut,
-                          opacity: visible ? 1.0 : 0.0,
-                          duration: _theme(context).controlsTransitionDuration,
-                          onEnd: _handleControlsTransitionEnd,
-                          child: Stack(
-                            clipBehavior: Clip.none,
-                            alignment: Alignment.bottomCenter,
-                            children: [
-                              // Top gradient.
-                              if (_theme(context).topButtonBar.isNotEmpty)
-                                Container(
-                                  decoration: const BoxDecoration(
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topCenter,
-                                      end: Alignment.bottomCenter,
-                                      stops: [
-                                        0.0,
-                                        0.2,
-                                      ],
-                                      colors: [
-                                        Color(0x61000000),
-                                        Color(0x00000000),
-                                      ],
+                        if (_theme(context).useBoundedControlsOpacityLayers)
+                          _BoundedMaterialDesktopControlsChrome(
+                            mount: mount,
+                            visible: visible,
+                            buffering: buffering,
+                            onTransitionEnd: _handleControlsTransitionEnd,
+                            onSeekStart: () {
+                              if (!mounted) return;
+                              _timer?.cancel();
+                              _timer = null;
+                            },
+                            onSeekEnd: () {
+                              if (!mounted) return;
+                              _lastInteractionAt = DateTime.now();
+                              _scheduleAutoHide();
+                            },
+                          ),
+                        if (!_theme(context).useBoundedControlsOpacityLayers)
+                          AnimatedOpacity(
+                            curve: Curves.easeInOut,
+                            opacity: visible ? 1.0 : 0.0,
+                            duration:
+                                _theme(context).controlsTransitionDuration,
+                            onEnd: _handleControlsTransitionEnd,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              alignment: Alignment.bottomCenter,
+                              children: [
+                                // Top gradient.
+                                if (_theme(context).topButtonBar.isNotEmpty)
+                                  Container(
+                                    decoration: const BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        stops: [
+                                          0.0,
+                                          0.2,
+                                        ],
+                                        colors: [
+                                          Color(0x61000000),
+                                          Color(0x00000000),
+                                        ],
+                                      ),
                                     ),
                                   ),
-                                ),
-                              // Bottom gradient.
-                              if (_theme(context).bottomButtonBar.isNotEmpty)
-                                Container(
-                                  decoration: const BoxDecoration(
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topCenter,
-                                      end: Alignment.bottomCenter,
-                                      stops: [
-                                        0.5,
-                                        1.0,
-                                      ],
-                                      colors: [
-                                        Color(0x00000000),
-                                        Color(0x61000000),
-                                      ],
+                                // Bottom gradient.
+                                if (_theme(context).bottomButtonBar.isNotEmpty)
+                                  Container(
+                                    decoration: const BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        stops: [
+                                          0.5,
+                                          1.0,
+                                        ],
+                                        colors: [
+                                          Color(0x00000000),
+                                          Color(0x61000000),
+                                        ],
+                                      ),
                                     ),
                                   ),
-                                ),
-                              if (mount)
-                                Padding(
-                                  padding: _theme(context).padding ??
-                                      (
-                                          // Add padding in fullscreen!
-                                          _adapter(context)
-                                                  .isFullscreen(context)
-                                              ? MediaQuery.of(context).padding
-                                              : EdgeInsets.zero),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    mainAxisAlignment: MainAxisAlignment.start,
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      Container(
-                                        height: _theme(context).buttonBarHeight,
-                                        margin:
-                                            _theme(context).topButtonBarMargin,
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.max,
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.start,
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.center,
-                                          children:
-                                              _theme(context).topButtonBar,
-                                        ),
-                                      ),
-                                      // Only display [primaryButtonBar] if [buffering] is false.
-                                      Expanded(
-                                        child: AnimatedOpacity(
-                                          curve: Curves.easeInOut,
-                                          opacity: buffering ? 0.0 : 1.0,
-                                          duration: _theme(context)
-                                              .controlsTransitionDuration,
-                                          child: Center(
-                                            child: Row(
-                                              mainAxisSize: MainAxisSize.min,
-                                              mainAxisAlignment:
-                                                  MainAxisAlignment.center,
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.center,
-                                              children: _theme(context)
-                                                  .primaryButtonBar,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                      if (_theme(context).displaySeekBar)
-                                        Builder(
-                                          builder: (context) {
-                                            final controlsTheme =
-                                                _theme(context);
-                                            return Transform.translate(
-                                              offset: controlsTheme
-                                                      .bottomButtonBar
-                                                      .isNotEmpty
-                                                  ? const Offset(0.0, 16.0)
-                                                  : Offset.zero,
-                                              child: MaterialDesktopSeekBar(
-                                                onSeekStart: () {
-                                                  if (!mounted) return;
-                                                  _timer?.cancel();
-                                                  _timer = null;
-                                                },
-                                                onSeekEnd: () {
-                                                  if (!mounted) return;
-                                                  _lastInteractionAt =
-                                                      DateTime.now();
-                                                  _scheduleAutoHide();
-                                                },
-                                              ),
-                                            );
-                                          },
-                                        ),
-                                      if (_theme(context)
-                                          .bottomButtonBar
-                                          .isNotEmpty)
+                                if (mount)
+                                  Padding(
+                                    padding: _theme(context).padding ??
+                                        (
+                                            // Add padding in fullscreen!
+                                            _adapter(context)
+                                                    .isFullscreen(context)
+                                                ? MediaQuery.of(context).padding
+                                                : EdgeInsets.zero),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.start,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.end,
+                                      children: [
                                         Container(
                                           height:
                                               _theme(context).buttonBarHeight,
                                           margin: _theme(context)
-                                              .bottomButtonBarMargin,
+                                              .topButtonBarMargin,
                                           child: Row(
                                             mainAxisSize: MainAxisSize.max,
                                             mainAxisAlignment:
@@ -1070,15 +1037,80 @@ class _MaterialDesktopVideoControlsState
                                             crossAxisAlignment:
                                                 CrossAxisAlignment.center,
                                             children:
-                                                _theme(context).bottomButtonBar,
+                                                _theme(context).topButtonBar,
                                           ),
                                         ),
-                                    ],
+                                        // Only display [primaryButtonBar] if [buffering] is false.
+                                        Expanded(
+                                          child: AnimatedOpacity(
+                                            curve: Curves.easeInOut,
+                                            opacity: buffering ? 0.0 : 1.0,
+                                            duration: _theme(context)
+                                                .controlsTransitionDuration,
+                                            child: Center(
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment.center,
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.center,
+                                                children: _theme(context)
+                                                    .primaryButtonBar,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        if (_theme(context).displaySeekBar)
+                                          Builder(
+                                            builder: (context) {
+                                              final controlsTheme =
+                                                  _theme(context);
+                                              return Transform.translate(
+                                                offset: controlsTheme
+                                                        .bottomButtonBar
+                                                        .isNotEmpty
+                                                    ? const Offset(0.0, 16.0)
+                                                    : Offset.zero,
+                                                child: MaterialDesktopSeekBar(
+                                                  onSeekStart: () {
+                                                    if (!mounted) return;
+                                                    _timer?.cancel();
+                                                    _timer = null;
+                                                  },
+                                                  onSeekEnd: () {
+                                                    if (!mounted) return;
+                                                    _lastInteractionAt =
+                                                        DateTime.now();
+                                                    _scheduleAutoHide();
+                                                  },
+                                                ),
+                                              );
+                                            },
+                                          ),
+                                        if (_theme(context)
+                                            .bottomButtonBar
+                                            .isNotEmpty)
+                                          Container(
+                                            height:
+                                                _theme(context).buttonBarHeight,
+                                            margin: _theme(context)
+                                                .bottomButtonBarMargin,
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.max,
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.start,
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.center,
+                                              children: _theme(context)
+                                                  .bottomButtonBar,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
                                   ),
-                                ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
                         // Buffering Indicator.
                         IgnorePointer(
                           child: Padding(
@@ -1142,6 +1174,204 @@ class _MaterialDesktopVideoControlsState
           ),
         ),
       ),
+    );
+  }
+}
+
+class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
+  final bool mount;
+  final bool visible;
+  final bool buffering;
+  final VoidCallback onTransitionEnd;
+  final VoidCallback onSeekStart;
+  final VoidCallback onSeekEnd;
+
+  const _BoundedMaterialDesktopControlsChrome({
+    required this.mount,
+    required this.visible,
+    required this.buffering,
+    required this.onTransitionEnd,
+    required this.onSeekStart,
+    required this.onSeekEnd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = _theme(context);
+    final opacity = visible ? 1.0 : 0.0;
+    final padding = theme.padding ??
+        (_adapter(context).isFullscreen(context)
+            ? MediaQuery.of(context).padding
+            : EdgeInsets.zero);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final topGradientHeight =
+            (constraints.maxHeight * 0.2).clamp(0.0, 180.0).toDouble();
+        final bottomGradientHeight =
+            (constraints.maxHeight * 0.5).clamp(0.0, 280.0).toDouble();
+
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            // A zero-area transition owns the unmount callback. The visible
+            // chrome below is split into bounded opacity layers, so none of
+            // them needs to cover the full video merely to coordinate state.
+            AnimatedOpacity(
+              opacity: opacity,
+              duration: theme.controlsTransitionDuration,
+              curve: Curves.easeInOut,
+              onEnd: onTransitionEnd,
+              child: const SizedBox.shrink(),
+            ),
+            if (theme.topButtonBar.isNotEmpty)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: topGradientHeight,
+                child: IgnorePointer(
+                  child: RepaintBoundary(
+                    child: AnimatedOpacity(
+                      opacity: opacity,
+                      duration: theme.controlsTransitionDuration,
+                      curve: Curves.easeInOut,
+                      child: mount
+                          ? const DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Color(0x61000000),
+                                    Color(0x00000000),
+                                  ],
+                                ),
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                  ),
+                ),
+              ),
+            if (theme.bottomButtonBar.isNotEmpty)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: bottomGradientHeight,
+                child: IgnorePointer(
+                  child: RepaintBoundary(
+                    child: AnimatedOpacity(
+                      opacity: opacity,
+                      duration: theme.controlsTransitionDuration,
+                      curve: Curves.easeInOut,
+                      child: mount
+                          ? const DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Color(0x00000000),
+                                    Color(0x61000000),
+                                  ],
+                                ),
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                  ),
+                ),
+              ),
+            Padding(
+              padding: padding,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  RepaintBoundary(
+                    child: AnimatedOpacity(
+                      opacity: opacity,
+                      duration: theme.controlsTransitionDuration,
+                      curve: Curves.easeInOut,
+                      child: mount
+                          ? Container(
+                              height: theme.buttonBarHeight,
+                              margin: theme.topButtonBarMargin,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.max,
+                                mainAxisAlignment: MainAxisAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: theme.topButtonBar,
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                  ),
+                  Expanded(
+                    child: Center(
+                      child: RepaintBoundary(
+                        child: AnimatedOpacity(
+                          opacity: visible && !buffering ? 1.0 : 0.0,
+                          duration: theme.controlsTransitionDuration,
+                          curve: Curves.easeInOut,
+                          child: mount
+                              ? Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                  children: theme.primaryButtonBar,
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+                      ),
+                    ),
+                  ),
+                  RepaintBoundary(
+                    child: AnimatedOpacity(
+                      opacity: opacity,
+                      duration: theme.controlsTransitionDuration,
+                      curve: Curves.easeInOut,
+                      child: mount
+                          ? Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (theme.displaySeekBar)
+                                  Transform.translate(
+                                    offset: theme.bottomButtonBar.isNotEmpty
+                                        ? const Offset(0.0, 16.0)
+                                        : Offset.zero,
+                                    child: MaterialDesktopSeekBar(
+                                      onSeekStart: onSeekStart,
+                                      onSeekEnd: onSeekEnd,
+                                    ),
+                                  ),
+                                if (theme.bottomButtonBar.isNotEmpty)
+                                  Container(
+                                    height: theme.buttonBarHeight,
+                                    margin: theme.bottomButtonBarMargin,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.max,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.start,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.center,
+                                      children: theme.bottomButtonBar,
+                                    ),
+                                  ),
+                              ],
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -1456,13 +1686,17 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                     Positioned(
                       left: 0,
                       right: 0,
-                      bottom: (_theme(context).seekBarContainerHeight ?? 36.0) / 2,
+                      bottom:
+                          (_theme(context).seekBarContainerHeight ?? 36.0) / 2,
                       height: _theme(context).danmakuHeatmapHeight,
                       child: IgnorePointer(
                         child: CustomPaint(
                           painter: _DanmakuHeatmapPainter(
                             _theme(context).danmakuHeatmap!,
-                            _theme(context).danmakuHeatmapColor ?? _theme(context).seekBarThumbColor.withOpacity(0.35),
+                            _theme(context).danmakuHeatmapColor ??
+                                _theme(context)
+                                    .seekBarThumbColor
+                                    .withOpacity(0.35),
                           ),
                         ),
                       ),
@@ -1504,7 +1738,10 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                             }
 
                             // Check if this chapter is hovered
-                            final bool isHovered = hover && (slider - percent).abs() * constraints.maxWidth < 8.0;
+                            final bool isHovered = hover &&
+                                (slider - percent).abs() *
+                                        constraints.maxWidth <
+                                    8.0;
 
                             return Positioned(
                               left: constraints.maxWidth * percent,
@@ -1513,15 +1750,22 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                               child: Container(
                                 width: isHovered ? 4.0 : 2.0,
                                 decoration: BoxDecoration(
-                                  color: isHovered ? _theme(context).seekBarThumbColor : const Color(0x66000000),
-                                  borderRadius: isHovered ? BorderRadius.circular(2.0) : null,
+                                  color: isHovered
+                                      ? _theme(context).seekBarThumbColor
+                                      : const Color(0x66000000),
+                                  borderRadius: isHovered
+                                      ? BorderRadius.circular(2.0)
+                                      : null,
                                 ),
                               ),
                             );
                           }),
-                        ..._theme(context).seekBarMarkers.where(
+                        ..._theme(context)
+                            .seekBarMarkers
+                            .where(
                               (marker) => marker > 0.0 && marker < 1.0,
-                            ).map((marker) {
+                            )
+                            .map((marker) {
                           final markerWidth =
                               _theme(context).seekBarMarkerWidth;
                           return Positioned(
@@ -2143,9 +2387,12 @@ class _DanmakuHeatmapPainter extends CustomPainter {
         final controlPointX = prevX + (stepX / 2);
 
         path.cubicTo(
-          controlPointX, prevY,
-          controlPointX, y,
-          x, y,
+          controlPointX,
+          prevY,
+          controlPointX,
+          y,
+          x,
+          y,
         );
       }
     }
