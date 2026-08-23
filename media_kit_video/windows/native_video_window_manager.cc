@@ -80,7 +80,8 @@ bool NativeVideoWindowManager::EnsureWindowClass() {
   return owns_window_class_;
 }
 
-HWND NativeVideoWindowManager::Create(int64_t handle) {
+HWND NativeVideoWindowManager::Create(int64_t handle,
+                                      bool video_above_flutter) {
   const auto existing = entries_.find(handle);
   if (existing != entries_.end()) return existing->second.window;
   RefreshFlutterWindow();
@@ -95,7 +96,8 @@ HWND NativeVideoWindowManager::Create(int64_t handle) {
 
   Entry entry{};
   entry.window = window;
-  entry.visible = true;
+  entry.visible = !shutdown_hidden_;
+  entry.video_above_flutter = video_above_flutter;
   RECT client{};
   if (flutter_window_ && ::GetClientRect(flutter_window_, &client)) {
     entry.width = std::max(1L, client.right - client.left) /
@@ -145,8 +147,8 @@ int NativeVideoWindowManager::SetBounds(int64_t handle,
   entry.y = y;
   entry.width = width;
   entry.height = height;
-  entry.visible = visible;
-  if (visible) {
+  entry.visible = visible && !shutdown_hidden_;
+  if (entry.visible) {
     ScheduleResync(entry);
   } else {
     entry.resync_deadline = 0;
@@ -163,6 +165,19 @@ void NativeVideoWindowManager::Dispose(int64_t handle) {
     ::DestroyWindow(item->second.window);
   }
   entries_.erase(item);
+}
+
+void NativeVideoWindowManager::HideAll() {
+  shutdown_hidden_ = true;
+  for (auto& item : entries_) {
+    auto& entry = item.second;
+    entry.visible = false;
+    entry.resync_deadline = 0;
+    if (entry.window) {
+      ::KillTimer(entry.window, kNativeVideoResyncTimer);
+      ::ShowWindow(entry.window, SW_HIDE);
+    }
+  }
 }
 
 void NativeVideoWindowManager::SyncAll() {
@@ -248,9 +263,13 @@ int NativeVideoWindowManager::Sync(Entry& entry) {
   const int height =
       std::max(1, static_cast<int>(std::lround(entry.height * scale)));
 
-  // Inserting after Flutter keeps the video directly below it in top-level
-  // z-order while preserving all Flutter-rendered controls and overlays.
-  if (::SetWindowPos(entry.window, flutter_window_, x, y, width, height,
+  // The production path inserts after Flutter so controls remain above the
+  // video. The opt-in diagnostic path puts video at the top of the non-topmost
+  // band, fully occluding Flutter over the video area and isolating DWM overlay
+  // composition without hiding the host (Alt+F4 and window lifecycle remain).
+  const HWND insert_after =
+      entry.video_above_flutter ? HWND_TOP : flutter_window_;
+  if (::SetWindowPos(entry.window, insert_after, x, y, width, height,
                      SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW)) {
     status |= 1 << 9;
   }

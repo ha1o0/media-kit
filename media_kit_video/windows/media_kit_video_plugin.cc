@@ -11,6 +11,10 @@
 #include "video_output_mode.h"
 
 #include <Windows.h>
+#include <dxgi.h>
+#include <wrl/client.h>
+
+#include <string>
 
 namespace media_kit_video {
 namespace {
@@ -24,6 +28,74 @@ const UINT kMainThreadTaskMessage =
     RegisterPluginMessage(L"media_kit_video.MainThreadTask", WM_APP + 0x6A1);
 const UINT kNativeWindowSyncMessage =
     RegisterPluginMessage(L"media_kit_video.NativeWindowSync", WM_APP + 0x6A2);
+
+std::string Utf8FromWide(const wchar_t* value) {
+  if (!value || value[0] == L'\0') return std::string();
+  const std::wstring wide(value);
+  const int input_length = static_cast<int>(wide.size());
+  const int length = ::WideCharToMultiByte(
+      CP_UTF8, 0, wide.data(), input_length, nullptr, 0, nullptr, nullptr);
+  if (length <= 0) return std::string();
+  std::string result(static_cast<size_t>(length), '\0');
+  ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), input_length, result.data(),
+                        length, nullptr, nullptr);
+  return result;
+}
+
+flutter::EncodableMap AdapterDiagnostics(IDXGIAdapter* adapter) {
+  flutter::EncodableMap result;
+  if (!adapter) return result;
+  DXGI_ADAPTER_DESC description{};
+  if (FAILED(adapter->GetDesc(&description))) return result;
+  result[flutter::EncodableValue("description")] =
+      flutter::EncodableValue(Utf8FromWide(description.Description));
+  result[flutter::EncodableValue("vendorId")] = flutter::EncodableValue(
+      static_cast<int64_t>(description.VendorId));
+  result[flutter::EncodableValue("deviceId")] = flutter::EncodableValue(
+      static_cast<int64_t>(description.DeviceId));
+  result[flutter::EncodableValue("dedicatedVideoMemory")] =
+      flutter::EncodableValue(
+          static_cast<int64_t>(description.DedicatedVideoMemory));
+  result[flutter::EncodableValue("sharedSystemMemory")] =
+      flutter::EncodableValue(
+          static_cast<int64_t>(description.SharedSystemMemory));
+  result[flutter::EncodableValue("luidHigh")] = flutter::EncodableValue(
+      static_cast<int64_t>(description.AdapterLuid.HighPart));
+  result[flutter::EncodableValue("luidLow")] = flutter::EncodableValue(
+      static_cast<int64_t>(description.AdapterLuid.LowPart));
+  return result;
+}
+
+flutter::EncodableMap CollectGraphicsDiagnostics(
+    flutter::PluginRegistrarWindows* registrar) {
+  flutter::EncodableMap result;
+  IDXGIAdapter* flutter_adapter = nullptr;
+  if (registrar) {
+    if (auto* view = registrar->GetView()) {
+      flutter_adapter = view->GetGraphicsAdapter();
+    }
+  }
+  result[flutter::EncodableValue("flutterAdapter")] =
+      flutter::EncodableValue(AdapterDiagnostics(flutter_adapter));
+
+  flutter::EncodableList adapters;
+  Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+  if (SUCCEEDED(::CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+    for (UINT index = 0;; index++) {
+      Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+      const HRESULT enumerate_result = factory->EnumAdapters1(index, &adapter);
+      if (enumerate_result == DXGI_ERROR_NOT_FOUND) break;
+      if (FAILED(enumerate_result)) break;
+      auto diagnostics = AdapterDiagnostics(adapter.Get());
+      diagnostics[flutter::EncodableValue("index")] =
+          flutter::EncodableValue(static_cast<int64_t>(index));
+      adapters.emplace_back(std::move(diagnostics));
+    }
+  }
+  result[flutter::EncodableValue("adapters")] =
+      flutter::EncodableValue(std::move(adapters));
+  return result;
+}
 
 }  // namespace
 
@@ -162,9 +234,25 @@ void MediaKitVideoPlugin::HandleMethodCall(
     const auto handle = std::get<std::string>(
         arguments.at(flutter::EncodableValue("handle")));
     const int64_t handle_value = std::stoll(handle);
-    const HWND window = native_video_window_manager_->Create(handle_value);
+    bool video_above_flutter = false;
+    const auto above_it =
+        arguments.find(flutter::EncodableValue("videoAboveFlutter"));
+    if (above_it != arguments.end() &&
+        std::holds_alternative<bool>(above_it->second)) {
+      video_above_flutter = std::get<bool>(above_it->second);
+    }
+    const HWND window = native_video_window_manager_->Create(
+        handle_value, video_above_flutter);
     result->Success(flutter::EncodableValue(
         static_cast<int64_t>(reinterpret_cast<intptr_t>(window))));
+  } else if (method_call.method_name().compare(
+                 "NativeVideoWindow.GetDiagnostics") == 0) {
+    result->Success(flutter::EncodableValue(
+        CollectGraphicsDiagnostics(registrar_)));
+  } else if (method_call.method_name().compare(
+                 "NativeVideoWindow.HideAll") == 0) {
+    native_video_window_manager_->HideAll();
+    result->Success(flutter::EncodableValue(std::monostate{}));
   } else if (method_call.method_name().compare(
                  "NativeVideoWindow.SetBounds") == 0) {
     const auto& arguments =

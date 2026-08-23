@@ -25,7 +25,7 @@ class NativeVideoWindowManager {
   NativeVideoWindowManager& operator=(const NativeVideoWindowManager&) =
       delete;
 
-  HWND Create(int64_t handle);
+  HWND Create(int64_t handle, bool video_above_flutter = false);
   int SetBounds(int64_t handle,
                 double x,
                 double y,
@@ -33,6 +33,7 @@ class NativeVideoWindowManager {
                 double height,
                 bool visible);
   void Dispose(int64_t handle);
+  void HideAll();
   bool HasWindows() const { return !entries_.empty(); }
   void SyncAll();
   void SyncAllForHostWindowPos(const WINDOWPOS& window_pos);
@@ -45,6 +46,7 @@ class NativeVideoWindowManager {
     double width = 0.0;
     double height = 0.0;
     bool visible = false;
+    bool video_above_flutter = false;
     ULONGLONG resync_deadline = 0;
     bool syncing = false;
   };
@@ -62,6 +64,7 @@ class NativeVideoWindowManager {
   HWND flutter_window_ = nullptr;
   std::unordered_map<int64_t, Entry> entries_;
   bool owns_window_class_ = false;
+  bool shutdown_hidden_ = false;
 };
 
 }  // namespace media_kit_video
