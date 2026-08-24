@@ -276,6 +276,13 @@ class MaterialDesktopVideoControlsThemeData {
   /// bottom chrome instead of allocating one full-video opacity layer.
   final bool useBoundedControlsOpacityLayers;
 
+  /// Keeps the bounded gradients at the same 20% top and 50% bottom extents
+  /// used by the legacy full-surface chrome.
+  ///
+  /// This is useful when migrating an existing surface to bounded opacity
+  /// layers without changing its established gradient appearance.
+  final bool preserveLegacyGradientExtents;
+
   /// Builder for the buffering indicator.
   final Widget Function(BuildContext)? bufferingIndicatorBuilder;
 
@@ -408,6 +415,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.controlsHoverDuration = const Duration(seconds: 3),
     this.controlsTransitionDuration = const Duration(milliseconds: 150),
     this.useBoundedControlsOpacityLayers = false,
+    this.preserveLegacyGradientExtents = false,
     this.bufferingIndicatorBuilder,
     this.primaryButtonBar = const [],
     this.topButtonBar = const [],
@@ -468,6 +476,7 @@ class MaterialDesktopVideoControlsThemeData {
     Duration? controlsHoverDuration,
     Duration? controlsTransitionDuration,
     bool? useBoundedControlsOpacityLayers,
+    bool? preserveLegacyGradientExtents,
     Widget Function(BuildContext)? bufferingIndicatorBuilder,
     List<Widget>? topButtonBar,
     EdgeInsets? topButtonBarMargin,
@@ -527,6 +536,8 @@ class MaterialDesktopVideoControlsThemeData {
           controlsTransitionDuration ?? this.controlsTransitionDuration,
       useBoundedControlsOpacityLayers: useBoundedControlsOpacityLayers ??
           this.useBoundedControlsOpacityLayers,
+      preserveLegacyGradientExtents:
+          preserveLegacyGradientExtents ?? this.preserveLegacyGradientExtents,
       topButtonBar: topButtonBar ?? this.topButtonBar,
       topButtonBarMargin: topButtonBarMargin ?? this.topButtonBarMargin,
       bottomButtonBar: bottomButtonBar ?? this.bottomButtonBar,
@@ -1206,10 +1217,13 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final topGradientHeight =
-            (constraints.maxHeight * 0.2).clamp(0.0, 180.0).toDouble();
-        final bottomGradientHeight =
-            (constraints.maxHeight * 0.5).clamp(0.0, 280.0).toDouble();
+        final legacyGradientExtents = theme.preserveLegacyGradientExtents;
+        final topGradientHeight = legacyGradientExtents
+            ? constraints.maxHeight * 0.2
+            : (constraints.maxHeight * 0.2).clamp(0.0, 180.0).toDouble();
+        final bottomGradientHeight = legacyGradientExtents
+            ? constraints.maxHeight * 0.5
+            : (constraints.maxHeight * 0.5).clamp(0.0, 280.0).toDouble();
 
         return Stack(
           clipBehavior: Clip.none,
