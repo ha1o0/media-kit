@@ -272,6 +272,13 @@ class MaterialDesktopVideoControlsThemeData {
   /// [Duration] for which the controls will be animated when shown or hidden.
   final Duration controlsTransitionDuration;
 
+  /// Whether the controls remain mounted while hidden.
+  ///
+  /// This avoids rebuilding the controls on every visibility change. Hidden
+  /// controls are excluded from painting, pointer input, focus and ticker
+  /// updates. They are disposed with the surrounding video controls.
+  final bool keepControlsMounted;
+
   /// Restricts controls opacity animations to the painted top, center and
   /// bottom chrome instead of allocating one full-video opacity layer.
   final bool useBoundedControlsOpacityLayers;
@@ -319,6 +326,11 @@ class MaterialDesktopVideoControlsThemeData {
 
   /// [Duration] for which the seek bar thumb will be animated when the user seeks.
   final Duration seekBarThumbTransitionDuration;
+
+  /// Minimum interval between automatic playback-position repaints.
+  ///
+  /// Pointer hover and seek gestures remain immediate and are not throttled.
+  final Duration seekBarPositionUpdateInterval;
 
   /// Margin around the seek bar.
   final EdgeInsets seekBarMargin;
@@ -414,6 +426,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.padding,
     this.controlsHoverDuration = const Duration(seconds: 3),
     this.controlsTransitionDuration = const Duration(milliseconds: 150),
+    this.keepControlsMounted = false,
     this.useBoundedControlsOpacityLayers = false,
     this.preserveLegacyGradientExtents = false,
     this.bufferingIndicatorBuilder,
@@ -435,6 +448,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.buttonBarButtonColor = const Color(0xFFFFFFFF),
     this.seekBarTransitionDuration = const Duration(milliseconds: 300),
     this.seekBarThumbTransitionDuration = const Duration(milliseconds: 150),
+    this.seekBarPositionUpdateInterval = const Duration(milliseconds: 66),
     this.seekBarMargin = const EdgeInsets.symmetric(horizontal: 16.0),
     this.seekBarHeight = 3.2,
     this.seekBarHoverHeight = 5.6,
@@ -475,6 +489,7 @@ class MaterialDesktopVideoControlsThemeData {
     bool? hideMouseOnControlsRemoval,
     Duration? controlsHoverDuration,
     Duration? controlsTransitionDuration,
+    bool? keepControlsMounted,
     bool? useBoundedControlsOpacityLayers,
     bool? preserveLegacyGradientExtents,
     Widget Function(BuildContext)? bufferingIndicatorBuilder,
@@ -487,6 +502,7 @@ class MaterialDesktopVideoControlsThemeData {
     Color? buttonBarButtonColor,
     Duration? seekBarTransitionDuration,
     Duration? seekBarThumbTransitionDuration,
+    Duration? seekBarPositionUpdateInterval,
     EdgeInsets? seekBarMargin,
     double? seekBarHeight,
     double? seekBarHoverHeight,
@@ -534,6 +550,7 @@ class MaterialDesktopVideoControlsThemeData {
           bufferingIndicatorBuilder ?? this.bufferingIndicatorBuilder,
       controlsTransitionDuration:
           controlsTransitionDuration ?? this.controlsTransitionDuration,
+      keepControlsMounted: keepControlsMounted ?? this.keepControlsMounted,
       useBoundedControlsOpacityLayers: useBoundedControlsOpacityLayers ??
           this.useBoundedControlsOpacityLayers,
       preserveLegacyGradientExtents:
@@ -550,6 +567,8 @@ class MaterialDesktopVideoControlsThemeData {
           seekBarTransitionDuration ?? this.seekBarTransitionDuration,
       seekBarThumbTransitionDuration:
           seekBarThumbTransitionDuration ?? this.seekBarThumbTransitionDuration,
+      seekBarPositionUpdateInterval:
+          seekBarPositionUpdateInterval ?? this.seekBarPositionUpdateInterval,
       seekBarMargin: seekBarMargin ?? this.seekBarMargin,
       seekBarHeight: seekBarHeight ?? this.seekBarHeight,
       seekBarHoverHeight: seekBarHoverHeight ?? this.seekBarHoverHeight,
@@ -632,6 +651,7 @@ class _MaterialDesktopVideoControlsState
     extends State<_MaterialDesktopVideoControls> {
   late bool mount;
   late bool visible;
+  late bool controlsActive;
 
   Timer? _timer;
   DateTime? _lastInteractionAt;
@@ -661,8 +681,10 @@ class _MaterialDesktopVideoControlsState
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (subscriptions.isEmpty) {
-      mount = _theme(context).visibleOnMount;
+      mount =
+          _theme(context).keepControlsMounted || _theme(context).visibleOnMount;
       visible = _theme(context).visibleOnMount;
+      controlsActive = visible;
 
       subscriptions.addAll(
         [
@@ -736,6 +758,7 @@ class _MaterialDesktopVideoControlsState
       setState(() {
         mount = true;
         visible = true;
+        controlsActive = true;
       });
       shiftSubtitle();
       _lastHoverHandledAt = now;
@@ -780,15 +803,38 @@ class _MaterialDesktopVideoControlsState
       }
     }
 
-    if (visible) {
-      setState(() {
-        visible = false;
-      });
-      unshiftSubtitle();
-    }
+    _hideControls();
+  }
+
+  void _hideControls() {
+    if (!mounted || !visible || _theme(context).lockControlsVisible) return;
+
+    final theme = _theme(context);
+    final unmountImmediately =
+        theme.controlsTransitionDuration == Duration.zero;
+    setState(() {
+      visible = false;
+      if (unmountImmediately && !theme.keepControlsMounted) {
+        // With no transition there is no reason to submit another frame only
+        // to unmount the controls from the transition-end callback.
+        mount = false;
+      }
+      if (unmountImmediately) {
+        controlsActive = false;
+      }
+    });
+    unshiftSubtitle();
   }
 
   void _handleControlsTransitionEnd() {
+    if (_theme(context).keepControlsMounted) {
+      if (!visible && controlsActive) {
+        setState(() {
+          controlsActive = false;
+        });
+      }
+      return;
+    }
     if (visible || !mount || _unmountScheduled) return;
     _unmountScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -803,13 +849,10 @@ class _MaterialDesktopVideoControlsState
   void onExit() {
     if (!mounted) return;
     if (_theme(context).lockControlsVisible) return;
-    setState(() {
-      visible = false;
-    });
-    unshiftSubtitle();
     _timer?.cancel();
     _timer = null;
     _lastInteractionAt = null;
+    _hideControls();
   }
 
   @override
@@ -947,10 +990,12 @@ class _MaterialDesktopVideoControlsState
                         }
                       : null,
                   child: MouseRegion(
-                    cursor:
-                        (_theme(context).hideMouseOnControlsRemoval && !mount)
-                            ? SystemMouseCursors.none
-                            : SystemMouseCursors.basic,
+                    cursor: (_theme(context).hideMouseOnControlsRemoval &&
+                            (_theme(context).keepControlsMounted
+                                ? !controlsActive
+                                : !mount))
+                        ? SystemMouseCursors.none
+                        : SystemMouseCursors.basic,
                     onHover: (_) => onHover(),
                     onEnter: (_) => onEnter(),
                     onExit: (_) => onExit(),
@@ -960,6 +1005,7 @@ class _MaterialDesktopVideoControlsState
                           _BoundedMaterialDesktopControlsChrome(
                             mount: mount,
                             visible: visible,
+                            controlsActive: controlsActive,
                             buffering: buffering,
                             onTransitionEnd: _handleControlsTransitionEnd,
                             onSeekStart: () {
@@ -1192,6 +1238,7 @@ class _MaterialDesktopVideoControlsState
 class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
   final bool mount;
   final bool visible;
+  final bool controlsActive;
   final bool buffering;
   final VoidCallback onTransitionEnd;
   final VoidCallback onSeekStart;
@@ -1200,22 +1247,43 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
   const _BoundedMaterialDesktopControlsChrome({
     required this.mount,
     required this.visible,
+    required this.controlsActive,
     required this.buffering,
     required this.onTransitionEnd,
     required this.onSeekStart,
     required this.onSeekEnd,
   });
 
+  Widget _buildOpacity({
+    required MaterialDesktopVideoControlsThemeData theme,
+    required bool visible,
+    required Widget child,
+    VoidCallback? onEnd,
+  }) {
+    if (theme.controlsTransitionDuration == Duration.zero) {
+      if (theme.keepControlsMounted) {
+        return Offstage(offstage: !visible, child: child);
+      }
+      return visible ? child : const SizedBox.shrink();
+    }
+    return AnimatedOpacity(
+      opacity: visible ? 1.0 : 0.0,
+      duration: theme.controlsTransitionDuration,
+      curve: Curves.easeInOut,
+      onEnd: onEnd,
+      child: child,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = _theme(context);
-    final opacity = visible ? 1.0 : 0.0;
     final padding = theme.padding ??
         (_adapter(context).isFullscreen(context)
             ? MediaQuery.of(context).padding
             : EdgeInsets.zero);
 
-    return LayoutBuilder(
+    final chrome = LayoutBuilder(
       builder: (context, constraints) {
         final legacyGradientExtents = theme.preserveLegacyGradientExtents;
         final topGradientHeight = legacyGradientExtents
@@ -1231,10 +1299,9 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
             // A zero-area transition owns the unmount callback. The visible
             // chrome below is split into bounded opacity layers, so none of
             // them needs to cover the full video merely to coordinate state.
-            AnimatedOpacity(
-              opacity: opacity,
-              duration: theme.controlsTransitionDuration,
-              curve: Curves.easeInOut,
+            _buildOpacity(
+              theme: theme,
+              visible: visible,
               onEnd: onTransitionEnd,
               child: const SizedBox.shrink(),
             ),
@@ -1246,10 +1313,9 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
                 height: topGradientHeight,
                 child: IgnorePointer(
                   child: RepaintBoundary(
-                    child: AnimatedOpacity(
-                      opacity: opacity,
-                      duration: theme.controlsTransitionDuration,
-                      curve: Curves.easeInOut,
+                    child: _buildOpacity(
+                      theme: theme,
+                      visible: visible,
                       child: mount
                           ? const DecoratedBox(
                               decoration: BoxDecoration(
@@ -1276,10 +1342,9 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
                 height: bottomGradientHeight,
                 child: IgnorePointer(
                   child: RepaintBoundary(
-                    child: AnimatedOpacity(
-                      opacity: opacity,
-                      duration: theme.controlsTransitionDuration,
-                      curve: Curves.easeInOut,
+                    child: _buildOpacity(
+                      theme: theme,
+                      visible: visible,
                       child: mount
                           ? const DecoratedBox(
                               decoration: BoxDecoration(
@@ -1306,10 +1371,9 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   RepaintBoundary(
-                    child: AnimatedOpacity(
-                      opacity: opacity,
-                      duration: theme.controlsTransitionDuration,
-                      curve: Curves.easeInOut,
+                    child: _buildOpacity(
+                      theme: theme,
+                      visible: visible,
                       child: mount
                           ? Container(
                               height: theme.buttonBarHeight,
@@ -1327,10 +1391,9 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
                   Expanded(
                     child: Center(
                       child: RepaintBoundary(
-                        child: AnimatedOpacity(
-                          opacity: visible && !buffering ? 1.0 : 0.0,
-                          duration: theme.controlsTransitionDuration,
-                          curve: Curves.easeInOut,
+                        child: _buildOpacity(
+                          theme: theme,
+                          visible: visible && !buffering,
                           child: mount
                               ? Row(
                                   mainAxisSize: MainAxisSize.min,
@@ -1344,10 +1407,9 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
                     ),
                   ),
                   RepaintBoundary(
-                    child: AnimatedOpacity(
-                      opacity: opacity,
-                      duration: theme.controlsTransitionDuration,
-                      curve: Curves.easeInOut,
+                    child: _buildOpacity(
+                      theme: theme,
+                      visible: visible,
                       child: mount
                           ? Column(
                               mainAxisSize: MainAxisSize.min,
@@ -1357,9 +1419,12 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
                                     offset: theme.bottomButtonBar.isNotEmpty
                                         ? const Offset(0.0, 16.0)
                                         : Offset.zero,
-                                    child: MaterialDesktopSeekBar(
-                                      onSeekStart: onSeekStart,
-                                      onSeekEnd: onSeekEnd,
+                                    child: RepaintBoundary(
+                                      child: MaterialDesktopSeekBar(
+                                        active: controlsActive,
+                                        onSeekStart: onSeekStart,
+                                        onSeekEnd: onSeekEnd,
+                                      ),
                                     ),
                                   ),
                                 if (theme.bottomButtonBar.isNotEmpty)
@@ -1387,6 +1452,17 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
         );
       },
     );
+    if (!theme.keepControlsMounted) return chrome;
+    return TickerMode(
+      enabled: controlsActive,
+      child: ExcludeFocus(
+        excluding: !controlsActive,
+        child: IgnorePointer(
+          ignoring: !controlsActive,
+          child: chrome,
+        ),
+      ),
+    );
   }
 }
 
@@ -1402,11 +1478,13 @@ class VideoChapter {
 
 /// Material design seek bar.
 class MaterialDesktopSeekBar extends StatefulWidget {
+  final bool active;
   final VoidCallback? onSeekStart;
   final VoidCallback? onSeekEnd;
 
   const MaterialDesktopSeekBar({
     super.key,
+    this.active = true,
     this.onSeekStart,
     this.onSeekEnd,
   });
@@ -1416,11 +1494,6 @@ class MaterialDesktopSeekBar extends StatefulWidget {
 }
 
 class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
-  // Position updates can arrive once per decoded frame (and faster at >1x
-  // playback speed). Keep the control surface responsive by limiting the
-  // seek-bar UI to a stable refresh rate while retaining immediate seek input.
-  static const _positionUiUpdateInterval = Duration(milliseconds: 66);
-
   bool hover = false;
   bool click = false;
   double slider = 0.0;
@@ -1430,6 +1503,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   late Duration position;
   late Duration duration;
   late Duration buffer;
+  late Duration _positionUiUpdateInterval;
 
   List<VideoChapter> chapters = [];
   bool chaptersExternallyManaged = false;
@@ -1443,6 +1517,30 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   void setState(VoidCallback fn) {
     if (mounted) {
       super.setState(fn);
+    }
+  }
+
+  void _updateState(VoidCallback fn) {
+    if (widget.active) {
+      setState(fn);
+    } else {
+      fn();
+    }
+  }
+
+  @override
+  void didUpdateWidget(MaterialDesktopSeekBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.active && !widget.active) {
+      _positionUpdateTimer?.cancel();
+      _positionUpdateTimer = null;
+    } else if (!oldWidget.active && widget.active) {
+      playing = _controls.playing;
+      position = _pendingPosition ?? _controls.position;
+      duration = _controls.duration;
+      buffer = _controls.buffer;
+      _pendingPosition = null;
+      _lastPositionUiUpdate = DateTime.now();
     }
   }
 
@@ -1461,6 +1559,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
     }
 
     final controlsTheme = _theme(context);
+    _positionUiUpdateInterval = controlsTheme.seekBarPositionUpdateInterval;
     chaptersExternallyManaged = controlsTheme.videoChapters != null;
     if (chaptersExternallyManaged && chapters.isNotEmpty) {
       chapters = [];
@@ -1476,6 +1575,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       position = _controls.position;
       duration = _controls.duration;
       buffer = _controls.buffer;
+      _lastPositionUiUpdate = DateTime.now();
 
       if (!chaptersExternallyManaged &&
           duration > Duration.zero &&
@@ -1485,7 +1585,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       subscriptions.addAll(
         [
           _controls.playingStream.listen((event) {
-            setState(() {
+            _updateState(() {
               playing = event;
             });
           }),
@@ -1493,13 +1593,19 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
             _positionUpdateTimer?.cancel();
             _positionUpdateTimer = null;
             _pendingPosition = null;
-            setState(() {
+            _updateState(() {
               position = Duration.zero;
             });
           }),
           _controls.positionStream.listen((event) {
             if (click) return;
             _pendingPosition = event;
+
+            if (!widget.active) {
+              position = event;
+              _pendingPosition = null;
+              return;
+            }
 
             final now = DateTime.now();
             final elapsed = now.difference(_lastPositionUiUpdate);
@@ -1513,17 +1619,17 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
             }
           }),
           _controls.durationStream.listen((event) {
-            setState(() {
+            _updateState(() {
               duration = event;
             });
             if (chaptersExternallyManaged) {
               if (chapters.isNotEmpty) {
-                setState(() {
+                _updateState(() {
                   chapters = [];
                 });
               }
             } else if (event == Duration.zero) {
-              setState(() {
+              _updateState(() {
                 chapters = [];
               });
             } else if (chapters.isEmpty) {
@@ -1531,7 +1637,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
             }
           }),
           _controls.bufferStream.listen((event) {
-            setState(() {
+            _updateState(() {
               buffer = event;
             });
           }),
@@ -1570,7 +1676,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
             ));
           }
           if (mounted) {
-            setState(() {
+            _updateState(() {
               chapters = newChapters;
             });
           }
@@ -1621,7 +1727,9 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
     position = _pendingPosition!;
     _pendingPosition = null;
     _lastPositionUiUpdate = timestamp ?? DateTime.now();
-    setState(() {});
+    if (widget.active) {
+      setState(() {});
+    }
   }
 
   void onHover(PointerHoverEvent e, BoxConstraints constraints) {
