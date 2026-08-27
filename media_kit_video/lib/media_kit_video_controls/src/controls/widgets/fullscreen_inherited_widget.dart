@@ -3,6 +3,8 @@
 /// Copyright © 2021 & onwards, Hitesh Kumar Saini <saini123hitesh@gmail.com>.
 /// All rights reserved.
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
@@ -69,7 +71,14 @@ class _FullscreenInheritedWidgetPopScopeState
             .parent
             .setNativeFullscreenRouteActive(false);
         // Make sure to exit native fullscreen when this route is popped from the navigator.
-        onExitFullscreen(context)?.call();
+        final callback = onExitFullscreen(context);
+        if (callback != null) {
+          unawaited(Future.sync(callback).catchError((error) {
+            if (kDebugMode) {
+              debugPrint('Error exiting fullscreen on pop: $error');
+            }
+          }));
+        }
       },
       child: widget.child,
     );
