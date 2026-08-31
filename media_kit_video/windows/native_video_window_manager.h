@@ -45,6 +45,13 @@ class NativeVideoWindowManager {
     double y = 0.0;
     double width = 0.0;
     double height = 0.0;
+    // Flutter view size when the latest exact Dart bounds were published.
+    // These values let host-window messages repair a resize immediately while
+    // the next Flutter layout is still pending.
+    double reference_view_width = 0.0;
+    double reference_view_height = 0.0;
+    bool tracks_view_right_edge = false;
+    bool tracks_view_bottom_edge = false;
     bool visible = false;
     bool video_above_flutter = false;
     int corner_preference = -1;

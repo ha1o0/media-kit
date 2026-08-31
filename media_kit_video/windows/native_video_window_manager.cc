@@ -20,6 +20,9 @@ constexpr UINT kNativeVideoResyncIntervalMs = 250;
 // Window effects and gpu-next may finish reconfiguring several seconds after
 // the first frame. Keep the low-frequency guard alive only during startup.
 constexpr ULONGLONG kNativeVideoResyncDurationMs = 10000;
+// Flutter layout coordinates are logical pixels. Allow a small rounding margin
+// when deciding whether the video viewport is attached to a view edge.
+constexpr double kViewEdgeTolerance = 2.0;
 // Use numeric values so the plugin still builds with Windows SDKs older than
 // 10.0.22000.0. Unsupported systems simply ignore the DWM attribute.
 constexpr auto kDwmWindowCornerPreference =
@@ -202,6 +205,30 @@ int NativeVideoWindowManager::SetBounds(int64_t handle,
   entry.y = y;
   entry.width = width;
   entry.height = height;
+  entry.reference_view_width = 0.0;
+  entry.reference_view_height = 0.0;
+  entry.tracks_view_right_edge = false;
+  entry.tracks_view_bottom_edge = false;
+  const auto view = registrar_ ? registrar_->GetView() : nullptr;
+  const HWND flutter_view = view ? view->GetNativeWindow() : nullptr;
+  RECT view_client{};
+  if (flutter_view && ::GetClientRect(flutter_view, &view_client)) {
+    RefreshFlutterWindow();
+    const double scale =
+        ScaleForWindow(flutter_window_ ? flutter_window_ : flutter_view);
+    const double view_width =
+        (view_client.right - view_client.left) / scale;
+    const double view_height =
+        (view_client.bottom - view_client.top) / scale;
+    if (view_width > 0.0 && view_height > 0.0) {
+      entry.reference_view_width = view_width;
+      entry.reference_view_height = view_height;
+      entry.tracks_view_right_edge =
+          std::abs(view_width - x - width) <= kViewEdgeTolerance;
+      entry.tracks_view_bottom_edge =
+          std::abs(view_height - y - height) <= kViewEdgeTolerance;
+    }
+  }
   entry.visible = visible && !shutdown_hidden_;
   if (entry.visible) {
     ScheduleResync(entry);
@@ -243,28 +270,50 @@ void NativeVideoWindowManager::SyncAll() {
 
 void NativeVideoWindowManager::SyncAllForHostWindowPos(
     const WINDOWPOS& window_pos) {
-  if ((window_pos.flags & SWP_NOMOVE) != 0) return;
   RefreshFlutterWindow();
   if (!flutter_window_) return;
 
   RECT current_host{};
   if (!::GetWindowRect(flutter_window_, &current_host)) return;
-  const int delta_x = window_pos.x - current_host.left;
-  const int delta_y = window_pos.y - current_host.top;
-  if (delta_x == 0 && delta_y == 0) return;
+  const int current_host_width = current_host.right - current_host.left;
+  const int current_host_height = current_host.bottom - current_host.top;
+  const int delta_x = (window_pos.flags & SWP_NOMOVE) == 0
+                          ? window_pos.x - current_host.left
+                          : 0;
+  const int delta_y = (window_pos.flags & SWP_NOMOVE) == 0
+                          ? window_pos.y - current_host.top
+                          : 0;
+  const int delta_width = (window_pos.flags & SWP_NOSIZE) == 0
+                              ? window_pos.cx - current_host_width
+                              : 0;
+  const int delta_height = (window_pos.flags & SWP_NOSIZE) == 0
+                               ? window_pos.cy - current_host_height
+                               : 0;
+  if (delta_x == 0 && delta_y == 0 && delta_width == 0 &&
+      delta_height == 0) {
+    return;
+  }
 
   for (auto& item : entries_) {
     auto& entry = item.second;
     if (!entry.window || !entry.visible || entry.syncing) continue;
     RECT current_video{};
     if (!::GetWindowRect(entry.window, &current_video)) continue;
+    const int current_video_width = current_video.right - current_video.left;
+    const int current_video_height = current_video.bottom - current_video.top;
+    const int target_width = std::max(
+        1, current_video_width +
+               (entry.tracks_view_right_edge ? delta_width : 0));
+    const int target_height = std::max(
+        1, current_video_height +
+               (entry.tracks_view_bottom_edge ? delta_height : 0));
+    const UINT flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER |
+                       SWP_SHOWWINDOW | SWP_NOCOPYBITS;
 
     entry.syncing = true;
     ::SetWindowPos(
         entry.window, nullptr, current_video.left + delta_x,
-        current_video.top + delta_y, current_video.right - current_video.left,
-        current_video.bottom - current_video.top,
-        SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_SHOWWINDOW);
+        current_video.top + delta_y, target_width, target_height, flags);
     entry.syncing = false;
   }
 }
@@ -314,10 +363,25 @@ int NativeVideoWindowManager::Sync(Entry& entry) {
   const double scale = ScaleForWindow(flutter_window_);
   const int x = view_origin.x + static_cast<int>(std::lround(entry.x * scale));
   const int y = view_origin.y + static_cast<int>(std::lround(entry.y * scale));
+  double logical_width = entry.width;
+  double logical_height = entry.height;
+  RECT view_client{};
+  if (::GetClientRect(flutter_view, &view_client)) {
+    const double current_view_width =
+        (view_client.right - view_client.left) / scale;
+    const double current_view_height =
+        (view_client.bottom - view_client.top) / scale;
+    if (entry.tracks_view_right_edge && entry.reference_view_width > 0.0) {
+      logical_width += current_view_width - entry.reference_view_width;
+    }
+    if (entry.tracks_view_bottom_edge && entry.reference_view_height > 0.0) {
+      logical_height += current_view_height - entry.reference_view_height;
+    }
+  }
   const int width =
-      std::max(1, static_cast<int>(std::lround(entry.width * scale)));
+      std::max(1, static_cast<int>(std::lround(logical_width * scale)));
   const int height =
-      std::max(1, static_cast<int>(std::lround(entry.height * scale)));
+      std::max(1, static_cast<int>(std::lround(logical_height * scale)));
 
   // The production path inserts after Flutter so controls remain above the
   // video. The opt-in diagnostic path puts video at the top of the non-topmost

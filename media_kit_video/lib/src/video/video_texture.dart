@@ -5,6 +5,7 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'dart:io';
 import 'dart:async';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video_controls/media_kit_video_controls.dart';
@@ -400,6 +401,15 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   }
 
   @override
+  void didChangeMetrics() {
+    // A desktop view resize always lays the render tree out again, but it does
+    // not necessarily rebuild this State. Make sure the native HWND receives
+    // the post-layout bounds even when no widget state changed.
+    _forceNativeWindowSync();
+    super.didChangeMetrics();
+  }
+
+  @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
@@ -547,8 +557,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
     if (widget.renderTexture || _nativeWindowSyncScheduled) return;
     // The original Video is retained underneath the fullscreen route.  Do
     // not let its stale RenderBox overwrite the fullscreen HWND bounds.
-    final fullscreenRoute =
-        media_kit_video_controls.FullscreenInheritedWidget.maybeOf(context);
+    final fullscreenRoute = context.getInheritedWidgetOfExactType<
+        media_kit_video_controls.FullscreenInheritedWidget>();
     final ownsNativeFullscreenWindow = fullscreenRoute == null
         ? !_nativeFullscreenRouteActive
         : fullscreenRoute.parent.nativeFullscreenRouteActive;
@@ -621,7 +631,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
       child: ValueListenableBuilder<VideoViewParameters>(
         valueListenable: videoViewParametersNotifier,
         builder: (context, videoViewParameters, _) {
-          return Container(
+          final viewport = Container(
             key: _nativeWindowViewportKey,
             clipBehavior: Clip.none,
             width: videoViewParameters.width,
@@ -737,6 +747,11 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
               ],
             ),
           );
+          if (widget.renderTexture) return viewport;
+          return _NativeWindowGeometryObserver(
+            onGeometryChanged: _scheduleNativeWindowSync,
+            child: viewport,
+          );
         },
       ),
     );
@@ -744,6 +759,61 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 }
 
 typedef VideoControlsBuilder = Widget Function(VideoState state);
+
+/// Reports layout and global-position changes without requiring [Video] to
+/// rebuild. Desktop window metrics may trigger layout/paint only, which is
+/// enough for Flutter content but previously left the independent video HWND
+/// at its last Dart-published rectangle.
+class _NativeWindowGeometryObserver extends SingleChildRenderObjectWidget {
+  final VoidCallback onGeometryChanged;
+
+  const _NativeWindowGeometryObserver({
+    required this.onGeometryChanged,
+    required super.child,
+  });
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderNativeWindowGeometryObserver(onGeometryChanged);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderNativeWindowGeometryObserver renderObject,
+  ) {
+    renderObject.onGeometryChanged = onGeometryChanged;
+  }
+}
+
+class _RenderNativeWindowGeometryObserver extends RenderProxyBox {
+  _RenderNativeWindowGeometryObserver(this._onGeometryChanged);
+
+  VoidCallback _onGeometryChanged;
+  Rect? _lastGlobalBounds;
+
+  set onGeometryChanged(VoidCallback value) {
+    _onGeometryChanged = value;
+  }
+
+  @override
+  void performLayout() {
+    final previousSize = hasSize ? size : null;
+    super.performLayout();
+    if (previousSize != size) {
+      _onGeometryChanged();
+    }
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final bounds = localToGlobal(Offset.zero) & size;
+    if (_lastGlobalBounds != bounds) {
+      _lastGlobalBounds = bounds;
+      _onGeometryChanged();
+    }
+    super.paint(context, offset);
+  }
+}
 
 class _VisualTransform extends StatelessWidget {
   final int rotation;
