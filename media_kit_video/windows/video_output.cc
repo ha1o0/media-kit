@@ -151,8 +151,23 @@ VideoOutput::VideoOutput(int64_t handle,
 }
 
 VideoOutput::~VideoOutput() {
-  destroyed_ = true;
-  auto promise = std::promise<void>();
+  {
+    std::lock_guard<std::mutex> lock(task_submission_mutex_);
+    destroyed_.store(true, std::memory_order_release);
+  }
+
+  // Stop both native frame sources, then wait until every worker task that
+  // captured |this| before destruction has completed.
+  auto stop_callbacks = thread_pool_ref_->Post([this]() {
+    if (render_context_) {
+      mpv_render_context_set_update_callback(render_context_, nullptr, nullptr);
+    }
+    if (d3d11_renderer_) {
+      d3d11_renderer_->SetFrameAvailableCallback({});
+    }
+  });
+  stop_callbacks.wait();
+
   int64_t texture_id = 0;
   {
     std::lock_guard<std::mutex> lock(frame_notification_mutex_);
@@ -160,51 +175,40 @@ VideoOutput::~VideoOutput() {
     texture_id_ = 0;
   }
   if (texture_id) {
+    auto unregistered = std::make_shared<std::promise<void>>();
+    auto unregister_future = unregistered->get_future();
     registrar_->texture_registrar()->UnregisterTexture(
-        texture_id, [&, texture_id]() {
-          // Add one more task into the thread pool queue & exit the destructor
-          // only when it gets executed. This will ensure that all the tasks
-          // posted to the thread pool i.e. render or resize before this are
-          // executed (and won't reference the dead object anymore), most
-          // notably |CheckAndResize| & |Render|.
-          auto future = thread_pool_ref_->Post([&, id = texture_id]() {
-            std::cout << "media_kit: VideoOutput: Free Texture: " << id
-                      << std::endl;
-            std::cout << "VideoOutput::~VideoOutput: "
-                      << reinterpret_cast<int64_t>(handle_) << std::endl;
-            std::lock_guard<std::mutex> lock(textures_mutex_);
-            texture_variants_.clear();
-            // H/W
-            textures_.clear();
-            // S/W
-            pixel_buffer_textures_.clear();
-            d3d11_renderer_.reset(nullptr);
-            promise.set_value();
-          });
+        texture_id, [unregistered]() {
+          unregistered->set_value();
         });
-  } else {
-    promise.set_value();
+    unregister_future.wait();
   }
 
-  promise.get_future().wait();
-
-  if (render_context_) {
-    thread_pool_ref_->Post([render_context = render_context_]() {
-      mpv_render_context_free(render_context);
-    });
-  }
+  auto release_resources = thread_pool_ref_->Post([this, texture_id]() {
+    std::cout << "media_kit: VideoOutput: Free Texture: " << texture_id
+              << std::endl;
+    std::cout << "VideoOutput::~VideoOutput: "
+              << reinterpret_cast<int64_t>(handle_) << std::endl;
+    if (render_context_) {
+      mpv_render_context_free(render_context_);
+      render_context_ = nullptr;
+    }
+    std::lock_guard<std::mutex> lock(textures_mutex_);
+    texture_variants_.clear();
+    // H/W
+    textures_.clear();
+    // S/W
+    pixel_buffer_textures_.clear();
+    d3d11_renderer_.reset(nullptr);
+  });
+  release_resources.wait();
 }
 
 void VideoOutput::NotifyRender() {
-  if (destroyed_.load(std::memory_order_acquire)) {
-    return;
-  }
-
+  std::lock_guard<std::mutex> lock(task_submission_mutex_);
+  if (destroyed_.load(std::memory_order_acquire)) return;
   render_requested_.store(true, std::memory_order_release);
-  if (render_task_pending_.exchange(true, std::memory_order_acq_rel)) {
-    return;
-  }
-
+  if (render_task_pending_.exchange(true, std::memory_order_acq_rel)) return;
   try {
     thread_pool_ref_->Post([this]() {
       render_requested_.store(false, std::memory_order_release);
@@ -228,6 +232,7 @@ void VideoOutput::NotifyRender() {
 }
 
 void VideoOutput::Render() {
+  if (destroyed_.load(std::memory_order_acquire)) return;
   if (texture_id_) {
     bool frame_available = false;
     // H/W
@@ -297,7 +302,10 @@ void VideoOutput::SetTextureUpdateCallback(
 
 void VideoOutput::SetSize(std::optional<int64_t> width,
                           std::optional<int64_t> height) {
-  thread_pool_ref_->Post([&, width, height]() {
+  std::lock_guard<std::mutex> lock(task_submission_mutex_);
+  if (destroyed_.load(std::memory_order_acquire)) return;
+  thread_pool_ref_->Post([this, width, height]() {
+    if (destroyed_.load(std::memory_order_acquire)) return;
     if (width.has_value()) {
       // H/W
       if (d3d11_renderer_ != nullptr) {
@@ -330,7 +338,10 @@ void VideoOutput::SetSize(std::optional<int64_t> width,
 }
 
 void VideoOutput::SetAnime4KEnabled(bool enabled) {
-  thread_pool_ref_->Post([&, enabled]() {
+  std::lock_guard<std::mutex> lock(task_submission_mutex_);
+  if (destroyed_.load(std::memory_order_acquire)) return;
+  thread_pool_ref_->Post([this, enabled]() {
+    if (destroyed_.load(std::memory_order_acquire)) return;
     if (d3d11_renderer_ != nullptr) {
       d3d11_renderer_->SetAnime4KEnabled(enabled);
     }
@@ -338,7 +349,10 @@ void VideoOutput::SetAnime4KEnabled(bool enabled) {
 }
 
 void VideoOutput::SetGPUThreadPriority(int priority) {
+  std::lock_guard<std::mutex> lock(task_submission_mutex_);
+  if (destroyed_.load(std::memory_order_acquire)) return;
   thread_pool_ref_->Post([this, priority]() {
+    if (destroyed_.load(std::memory_order_acquire)) return;
     if (d3d11_renderer_ != nullptr) {
       d3d11_renderer_->SetGPUThreadPriority(priority);
     }
@@ -346,6 +360,7 @@ void VideoOutput::SetGPUThreadPriority(int priority) {
 }
 
 void VideoOutput::CheckAndResize() {
+  if (destroyed_.load(std::memory_order_acquire)) return;
   // Check if a new texture with different dimensions is needed.
   auto required_width = GetVideoWidth(), required_height = GetVideoHeight();
   if (required_width < 1 || required_height < 1) {
@@ -373,6 +388,7 @@ void VideoOutput::CheckAndResize() {
 }
 
 void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
+  if (destroyed_.load(std::memory_order_acquire)) return;
   std::cout << required_width << " " << required_height << std::endl;
   // Unregister previously registered texture & delete underlying objects.
   int64_t old_texture_id = 0;
@@ -383,33 +399,20 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
   }
   if (old_texture_id) {
     const int64_t id = old_texture_id;
-    const bool wait_for_unregister = d3d11_renderer_ != nullptr;
-    auto unregister_completed =
-        wait_for_unregister ? std::make_shared<std::promise<void>>() : nullptr;
-    std::future<void> unregister_future;
-    if (unregister_completed) {
-      unregister_future = unregister_completed->get_future();
-    }
+    auto unregister_completed = std::make_shared<std::promise<void>>();
+    auto unregister_future = unregister_completed->get_future();
     registrar_->texture_registrar()->UnregisterTexture(
-        id, [this, id, unregister_completed]() {
-          if (id) {
-            std::cout << "media_kit: VideoOutput: Free Texture: " << id
-                      << std::endl;
-            std::lock_guard<std::mutex> lock(textures_mutex_);
-            if (!destroyed_) {
-              texture_variants_.erase(id);
-              textures_.erase(id);
-              pixel_buffer_textures_.erase(id);
-            }
-          }
-          if (unregister_completed) {
-            unregister_completed->set_value();
-          }
-        });
-    if (unregister_completed) {
-      unregister_future.wait();
+        id, [unregister_completed]() { unregister_completed->set_value(); });
+    unregister_future.wait();
+    std::cout << "media_kit: VideoOutput: Free Texture: " << id << std::endl;
+    {
+      std::lock_guard<std::mutex> lock(textures_mutex_);
+      texture_variants_.erase(id);
+      textures_.erase(id);
+      pixel_buffer_textures_.erase(id);
     }
   }
+  if (destroyed_.load(std::memory_order_acquire)) return;
   // H/W
   if (d3d11_renderer_ != nullptr) {
     d3d11_renderer_->SetSize(static_cast<int32_t>(required_width),

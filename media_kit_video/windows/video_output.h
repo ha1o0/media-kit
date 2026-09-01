@@ -121,6 +121,9 @@ class VideoOutput {
   std::atomic<bool> render_task_pending_{false};
   std::atomic<bool> render_requested_{false};
 
+  // Serializes task submission with destruction so no worker job can capture
+  // this object after the teardown barrier has been queued.
+  std::mutex task_submission_mutex_ = std::mutex();
   std::mutex textures_mutex_ = std::mutex();
   std::mutex frame_notification_mutex_ = std::mutex();
 

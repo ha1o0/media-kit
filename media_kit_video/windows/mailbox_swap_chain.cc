@@ -579,12 +579,11 @@ void MailboxSwapChain::CompletionLoop() {
 }
 
 void MailboxSwapChain::NotifyFrameAvailable() {
-  std::function<void()> callback;
-  {
-    std::lock_guard<std::mutex> lock(callback_mutex_);
-    callback = frame_available_callback_;
-  }
-  if (callback) callback();
+  // Invoke under the same lock used by SetFrameAvailableCallback. Clearing
+  // the callback during VideoOutput teardown then becomes a synchronization
+  // barrier: no copied callback can outlive its VideoOutput owner.
+  std::lock_guard<std::mutex> lock(callback_mutex_);
+  if (frame_available_callback_) frame_available_callback_();
 }
 
 HRESULT MailboxSwapChain::WaitForSlot(int slot) {
