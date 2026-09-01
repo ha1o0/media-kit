@@ -680,10 +680,11 @@ class _MaterialDesktopVideoControlsState
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final theme = _theme(context);
     if (subscriptions.isEmpty) {
       mount =
-          _theme(context).keepControlsMounted || _theme(context).visibleOnMount;
-      visible = _theme(context).visibleOnMount;
+          theme.keepControlsMounted || theme.visibleOnMount;
+      visible = theme.visibleOnMount;
       controlsActive = visible;
 
       subscriptions.addAll(
@@ -701,8 +702,15 @@ class _MaterialDesktopVideoControlsState
         ],
       );
 
-      if (_theme(context).visibleOnMount) {
+      if (theme.visibleOnMount) {
         _lastInteractionAt = DateTime.now();
+        _scheduleAutoHide();
+      }
+    } else {
+      if (visible &&
+          !theme.lockControlsVisible &&
+          (_timer == null || !_timer!.isActive)) {
+        _lastInteractionAt = null;
         _scheduleAutoHide();
       }
     }
