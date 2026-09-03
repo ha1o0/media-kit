@@ -29,6 +29,13 @@ constexpr auto kDwmWindowCornerPreference =
     static_cast<DWMWINDOWATTRIBUTE>(33);
 constexpr int kDwmDoNotRound = 1;
 constexpr int kDwmRound = 2;
+// DWMWA_NCRENDERING_POLICY constant (not in older SDKs)
+constexpr auto kDwmNcRenderingPolicy = static_cast<DWMWINDOWATTRIBUTE>(2);
+constexpr int kDwmNcRenderingDisabled = 1;
+// DWMWA_BORDER_COLOR constant
+constexpr auto kDwmBorderColor = static_cast<DWMWINDOWATTRIBUTE>(34);
+// DWMWA_SYSTEMBACKDROP_TYPE constant
+constexpr auto kDwmSystemBackdropType = static_cast<DWMWINDOWATTRIBUTE>(38);
 
 NativeVideoWindowManager* g_native_video_window_manager = nullptr;
 
@@ -131,6 +138,15 @@ HWND NativeVideoWindowManager::Create(int64_t handle,
       WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
       0, 0, 1, 1, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
   if (!window) return nullptr;
+
+  // Remove all borders by setting border width to 0
+  MARGINS margins = {0, 0, 0, 0};
+  ::DwmExtendFrameIntoClientArea(window, &margins);
+
+  // Set border color to transparent to hide any remaining border
+  COLORREF border_color = 0x00000000;  // Transparent
+  ::DwmSetWindowAttribute(window, kDwmBorderColor,
+                          &border_color, sizeof(border_color));
 
   Entry entry{};
   entry.window = window;
@@ -400,6 +416,17 @@ LRESULT CALLBACK NativeVideoWindowManager::WindowProc(HWND window,
                                                        UINT message,
                                                        WPARAM wparam,
                                                        LPARAM lparam) {
+  if (message == WM_NCCALCSIZE) {
+    // Claim the whole window rect as client area to remove the default border.
+    // This matches what the main Flutter window does.
+    if (wparam) {
+      return 0;  // Return 0 to use the proposed rect as-is
+    }
+  }
+  if (message == WM_NCPAINT) {
+    // Prevent Windows from painting any non-client area (border/frame)
+    return 0;
+  }
   if (message == WM_WINDOWPOSCHANGING && lparam) {
     auto* position = reinterpret_cast<WINDOWPOS*>(lparam);
     if ((position->flags & SWP_NOSIZE) == 0) {
