@@ -406,8 +406,11 @@ class MaterialDesktopVideoControlsThemeData {
   /// The height of the danmaku heatmap curve.
   final double danmakuHeatmapHeight;
 
-  /// The color of the danmaku heatmap curve.
+  /// The color of the danmaku heatmap curve (played portion).
   final Color? danmakuHeatmapColor;
+
+  /// The color of the unplayed portion of the danmaku heatmap curve.
+  final Color? danmakuHeatmapUnplayedColor;
 
   /// Whether to lock the controls to stay visible (prevents auto-hide).
   final bool lockControlsVisible;
@@ -473,6 +476,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.danmakuHeatmap,
     this.danmakuHeatmapHeight = 40.0,
     this.danmakuHeatmapColor,
+    this.danmakuHeatmapUnplayedColor,
     this.lockControlsVisible = false,
   });
 
@@ -527,6 +531,7 @@ class MaterialDesktopVideoControlsThemeData {
     List<double>? danmakuHeatmap,
     double? danmakuHeatmapHeight,
     Color? danmakuHeatmapColor,
+    Color? danmakuHeatmapUnplayedColor,
     bool? lockControlsVisible,
   }) {
     return MaterialDesktopVideoControlsThemeData(
@@ -597,6 +602,8 @@ class MaterialDesktopVideoControlsThemeData {
       danmakuHeatmap: danmakuHeatmap ?? this.danmakuHeatmap,
       danmakuHeatmapHeight: danmakuHeatmapHeight ?? this.danmakuHeatmapHeight,
       danmakuHeatmapColor: danmakuHeatmapColor ?? this.danmakuHeatmapColor,
+      danmakuHeatmapUnplayedColor:
+          danmakuHeatmapUnplayedColor ?? this.danmakuHeatmapUnplayedColor,
       lockControlsVisible: lockControlsVisible ?? this.lockControlsVisible,
     );
   }
@@ -1484,6 +1491,18 @@ class VideoChapter {
   const VideoChapter(this.index, this.title, this.time);
 }
 
+class _SeekBarSegment {
+  final double start;
+  final double end;
+  final String title;
+
+  const _SeekBarSegment({
+    required this.start,
+    required this.end,
+    required this.title,
+  });
+}
+
 /// Material design seek bar.
 class MaterialDesktopSeekBar extends StatefulWidget {
   final bool active;
@@ -1516,6 +1535,26 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
   List<VideoChapter> chapters = [];
   bool chaptersExternallyManaged = false;
 
+  List<_SeekBarSegment>? _cachedSegments;
+  List<VideoChapter>? _lastChapters;
+  Duration? _lastDuration;
+
+  List<_SeekBarSegment> _getSegments(
+    List<VideoChapter> rawChapters,
+    Duration totalDuration,
+  ) {
+    if (_cachedSegments != null &&
+        identical(_lastChapters, rawChapters) &&
+        _lastDuration == totalDuration) {
+      return _cachedSegments!;
+    }
+    _lastChapters = rawChapters;
+    _lastDuration = totalDuration;
+    _cachedSegments = _resolveSegments(rawChapters, totalDuration);
+    return _cachedSegments!;
+  }
+
+  final ValueNotifier<double> _sliderNotifier = ValueNotifier<double>(0.0);
   final List<StreamSubscription> subscriptions = [];
   Timer? _positionUpdateTimer;
   Duration? _pendingPosition;
@@ -1656,6 +1695,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
 
   @override
   void dispose() {
+    _sliderNotifier.dispose();
     _positionUpdateTimer?.cancel();
     for (final subscription in subscriptions) {
       subscription.cancel();
@@ -1697,10 +1737,11 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
 
   void onPointerMove(PointerMoveEvent e, BoxConstraints constraints) {
     if (!mounted) return;
-    final percent = e.localPosition.dx / constraints.maxWidth;
+    final percent = (e.localPosition.dx / constraints.maxWidth).clamp(0.0, 1.0);
+    _sliderNotifier.value = percent;
     setState(() {
       hover = true;
-      slider = percent.clamp(0.0, 1.0);
+      slider = percent;
     });
     _controls.seek(duration * slider);
   }
@@ -1742,24 +1783,36 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
 
   void onHover(PointerHoverEvent e, BoxConstraints constraints) {
     if (!mounted) return;
-    final percent = e.localPosition.dx / constraints.maxWidth;
-    setState(() {
-      hover = true;
-      slider = percent.clamp(0.0, 1.0);
-    });
+    final percent = (e.localPosition.dx / constraints.maxWidth).clamp(0.0, 1.0);
+    if (!hover) {
+      _sliderNotifier.value = percent;
+      slider = percent;
+      setState(() {
+        hover = true;
+      });
+      return;
+    }
+    // 悬停移动过程中，仅更新轻量 Notifier，实现 0 Widget 重建，彻底解放 UI 线程
+    // 过滤小于 0.5px 的亚像素抖动
+    if ((_sliderNotifier.value - percent).abs() * constraints.maxWidth >= 0.5) {
+      _sliderNotifier.value = percent;
+      slider = percent;
+    }
   }
 
   void onEnter(PointerEnterEvent e, BoxConstraints constraints) {
     if (!mounted) return;
-    final percent = e.localPosition.dx / constraints.maxWidth;
+    final percent = (e.localPosition.dx / constraints.maxWidth).clamp(0.0, 1.0);
+    _sliderNotifier.value = percent;
     setState(() {
       hover = true;
-      slider = percent.clamp(0.0, 1.0);
+      slider = percent;
     });
   }
 
   void onExit(PointerExitEvent e, BoxConstraints constraints) {
     if (!mounted) return;
+    _sliderNotifier.value = 0.0;
     setState(() {
       hover = false;
       slider = 0.0;
@@ -1803,95 +1856,58 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
             onPointerMove: (e) => onPointerMove(e, constraints),
             onPointerDown: (e) => onPointerDown(),
             onPointerUp: (e) => onPointerUp(),
-            child: Container(
-              color: const Color(0x00000000),
-              width: constraints.maxWidth,
-              height: _theme(context).seekBarContainerHeight,
-              child: Stack(
-                clipBehavior: Clip.none,
-                alignment: Alignment.centerLeft,
-                children: [
-                  if (_theme(context).danmakuHeatmap != null &&
-                      _theme(context).danmakuHeatmap!.isNotEmpty)
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom:
-                          (_theme(context).seekBarContainerHeight ?? 36.0) / 2,
-                      height: _theme(context).danmakuHeatmapHeight,
-                      child: IgnorePointer(
-                        child: CustomPaint(
-                          painter: _DanmakuHeatmapPainter(
-                            _theme(context).danmakuHeatmap!,
-                            _theme(context).danmakuHeatmapColor ??
-                                _theme(context)
-                                    .seekBarThumbColor
-                                    .withOpacity(0.35),
+            child: RepaintBoundary(
+              child: Container(
+                color: const Color(0x00000000),
+                width: constraints.maxWidth,
+                height: _theme(context).seekBarContainerHeight,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  alignment: Alignment.centerLeft,
+                  children: [
+                    if (_theme(context).danmakuHeatmap != null &&
+                        _theme(context).danmakuHeatmap!.isNotEmpty)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: _theme(context).seekBarContainerHeight / 2 +
+                            _theme(context).seekBarHeight / 2,
+                        height: _theme(context).danmakuHeatmapHeight,
+                        child: IgnorePointer(
+                          child: CustomPaint(
+                            painter: _DanmakuHeatmapPainter(
+                              heatmap: _theme(context).danmakuHeatmap!,
+                              playedColor: _theme(context).danmakuHeatmapColor ??
+                                  _theme(context)
+                                      .seekBarPositionColor
+                                      .withValues(alpha: 0.45),
+                              unplayedColor: _theme(context)
+                                      .danmakuHeatmapUnplayedColor ??
+                                  _theme(context)
+                                      .seekBarColor,
+                              playedProgress: click ? slider : positionPercent,
+                              bufferProgress: bufferPercent,
+                              bufferColor: _theme(context).seekBarBufferColor,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  AnimatedContainer(
-                    width: constraints.maxWidth,
-                    height: hover
-                        ? _theme(context).seekBarHoverHeight
-                        : _theme(context).seekBarHeight,
-                    alignment: Alignment.centerLeft,
-                    duration: _theme(context).seekBarThumbTransitionDuration,
-                    color: _theme(context).seekBarColor,
-                    child: Stack(
-                      clipBehavior: Clip.none,
+                    Container(
+                      width: constraints.maxWidth,
+                      height: _theme(context).seekBarHoverHeight,
                       alignment: Alignment.centerLeft,
-                      children: [
-                        Container(
-                          width: constraints.maxWidth * slider,
-                          color: _theme(context).seekBarHoverColor,
-                        ),
-                        Container(
-                          width: constraints.maxWidth * bufferPercent,
-                          color: _theme(context).seekBarBufferColor,
-                        ),
-                        Container(
-                          width: click
-                              ? constraints.maxWidth * slider
-                              : constraints.maxWidth * positionPercent,
-                          color: _theme(context).seekBarPositionColor,
-                        ),
-                        if (_theme(context).showVideoChapters &&
-                            displayedChapters.isNotEmpty &&
-                            duration.inMilliseconds > 0)
-                          ...displayedChapters.map((chapter) {
-                            final percent = chapter.time /
-                                (duration.inMilliseconds / 1000.0);
-                            if (percent <= 0.0 || percent >= 1.0) {
-                              return const SizedBox.shrink();
-                            }
-
-                            // Check if this chapter is hovered
-                            final bool isHovered = hover &&
-                                (slider - percent).abs() *
-                                        constraints.maxWidth <
-                                    8.0;
-
-                            return Positioned(
-                              left: constraints.maxWidth * percent,
-                              top: isHovered ? -2.0 : 0,
-                              bottom: isHovered ? -2.0 : 0,
-                              child: Container(
-                                width: isHovered ? 4.0 : 2.0,
-                                decoration: BoxDecoration(
-                                  color: isHovered
-                                      ? _theme(context).seekBarThumbColor
-                                      : const Color(0x66000000),
-                                  borderRadius: isHovered
-                                      ? BorderRadius.circular(2.0)
-                                      : null,
-                                ),
-                              ),
-                            );
-                          }),
-                        ..._theme(context)
-                            .seekBarMarkers
+                      color: Colors.transparent,
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        alignment: Alignment.centerLeft,
+                        children: [
+                          _buildTrackWidget(
+                            context,
+                            constraints.maxWidth,
+                            displayedChapters,
+                          ),
+                          ..._theme(context)
+                              .seekBarMarkers
                             .where(
                               (marker) => marker > 0.0 && marker < 1.0,
                             )
@@ -1948,7 +1964,261 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
           ),
         ),
       ),
+    ),
+  );
+}
+
+  List<_SeekBarSegment> _resolveSegments(
+    List<VideoChapter> rawChapters,
+    Duration totalDuration,
+  ) {
+    final totalSeconds = totalDuration.inMilliseconds / 1000.0;
+    if (totalSeconds <= 0 || rawChapters.isEmpty) return const [];
+
+    final valid = rawChapters
+        .where((c) => c.time >= 0 && c.time < totalSeconds)
+        .toList()
+      ..sort((a, b) => a.time.compareTo(b.time));
+
+    if (valid.isEmpty) return const [];
+
+    final List<double> splitPoints = [];
+    final List<String> titles = [];
+
+    // 如果第一个章节起点距离 0 秒超过 0.5 秒，先补入 0 作为开篇
+    if (valid.first.time > 0.5) {
+      splitPoints.add(0.0);
+      titles.add(valid.first.title);
+    }
+
+    for (final ch in valid) {
+      if (splitPoints.isEmpty || (ch.time - splitPoints.last).abs() >= 0.5) {
+        splitPoints.add(ch.time);
+        titles.add(ch.title);
+      }
+    }
+
+    // 终点
+    splitPoints.add(totalSeconds);
+
+    if (splitPoints.length <= 2) return const [];
+
+    final segments = <_SeekBarSegment>[];
+    for (int i = 0; i < splitPoints.length - 1; i++) {
+      final start = (splitPoints[i] / totalSeconds).clamp(0.0, 1.0);
+      final end = (splitPoints[i + 1] / totalSeconds).clamp(0.0, 1.0);
+      if (end > start) {
+        segments.add(
+          _SeekBarSegment(
+            start: start,
+            end: end,
+            title: i < titles.length ? titles[i] : '',
+          ),
+        );
+      }
+    }
+    return segments;
+  }
+
+  Widget _buildTrackWidget(
+    BuildContext context,
+    double maxWidth,
+    List<VideoChapter> displayedChapters,
+  ) {
+    final showChapters = _theme(context).showVideoChapters;
+    final segments = showChapters
+        ? _getSegments(displayedChapters, duration)
+        : const <_SeekBarSegment>[];
+
+    return Positioned.fill(
+      child: ValueListenableBuilder<double>(
+        valueListenable: _sliderNotifier,
+        builder: (context, currentSlider, _) {
+          return CustomPaint(
+            painter: _SegmentedSeekBarPainter(
+              segments: segments,
+              normalHeight: _theme(context).seekBarHeight,
+              hoverHeight: _theme(context).seekBarHoverHeight,
+              backgroundColor: _theme(context).seekBarColor,
+              hoverColor: _theme(context).seekBarHoverColor,
+              bufferColor: _theme(context).seekBarBufferColor,
+              positionColor: _theme(context).seekBarPositionColor,
+              slider: currentSlider,
+              bufferPercent: bufferPercent,
+              positionPercent: positionPercent,
+              isHovered: hover,
+              isClick: click,
+            ),
+          );
+        },
+      ),
     );
+  }
+}
+
+class _SegmentedSeekBarPainter extends CustomPainter {
+  final List<_SeekBarSegment> segments;
+  final double normalHeight;
+  final double hoverHeight;
+  final Color backgroundColor;
+  final Color hoverColor;
+  final Color bufferColor;
+  final Color positionColor;
+  final double slider;
+  final double bufferPercent;
+  final double positionPercent;
+  final bool isHovered;
+  final bool isClick;
+
+  _SegmentedSeekBarPainter({
+    required this.segments,
+    required this.normalHeight,
+    required this.hoverHeight,
+    required this.backgroundColor,
+    required this.hoverColor,
+    required this.bufferColor,
+    required this.positionColor,
+    required this.slider,
+    required this.bufferPercent,
+    required this.positionPercent,
+    required this.isHovered,
+    required this.isClick,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double currentPercent = isClick ? slider : positionPercent;
+    final double totalWidth = size.width;
+    final double totalHeight = size.height;
+
+    // 单轨无分段模式
+    if (segments.length < 2) {
+      final double h = isHovered ? hoverHeight : normalHeight;
+      final double top = (totalHeight - h) / 2.0;
+      final RRect rrect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(0, top, totalWidth, h),
+        Radius.zero,
+      );
+
+      final bgPaint = Paint()..color = backgroundColor;
+      canvas.drawRRect(rrect, bgPaint);
+
+      canvas.save();
+      canvas.clipRRect(rrect);
+
+      if (isHovered && slider > 0) {
+        final hoverPaint = Paint()..color = hoverColor;
+        canvas.drawRect(
+          Rect.fromLTWH(0, top, totalWidth * slider, h),
+          hoverPaint,
+        );
+      }
+      if (bufferPercent > 0) {
+        final bufPaint = Paint()..color = bufferColor;
+        canvas.drawRect(
+          Rect.fromLTWH(0, top, totalWidth * bufferPercent, h),
+          bufPaint,
+        );
+      }
+      if (currentPercent > 0) {
+        final posPaint = Paint()..color = positionColor;
+        canvas.drawRect(
+          Rect.fromLTWH(0, top, totalWidth * currentPercent, h),
+          posPaint,
+        );
+      }
+      canvas.restore();
+      return;
+    }
+
+    // 分段胶囊模式：仅当前悬停分段加粗
+    const double gap = 2.5;
+    final int count = segments.length;
+    final bgPaint = Paint()..color = backgroundColor;
+    final hoverPaint = Paint()..color = hoverColor;
+    final bufPaint = Paint()..color = bufferColor;
+    final posPaint = Paint()..color = positionColor;
+
+    for (int i = 0; i < count; i++) {
+      final seg = segments[i];
+      final double rawLeft = totalWidth * seg.start;
+      final double rawRight = totalWidth * seg.end;
+
+      final double left = (i == 0) ? rawLeft : (rawLeft + gap / 2.0);
+      final double right =
+          (i == count - 1) ? rawRight : (rawRight - gap / 2.0);
+      final double width = (right - left).clamp(0.0, totalWidth);
+      if (width <= 0) continue;
+
+      final double span = seg.end - seg.start;
+      if (span <= 0) continue;
+
+      final bool isSegmentHovered = isHovered &&
+          slider >= seg.start &&
+          (i == count - 1 ? slider <= seg.end : slider < seg.end);
+
+      final double h = isSegmentHovered ? hoverHeight : normalHeight;
+      final double top = (totalHeight - h) / 2.0;
+      final double radius = isSegmentHovered ? 2.0 : 1.5;
+
+      final RRect rrect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(left, top, width, h),
+        Radius.circular(radius),
+      );
+
+      // 1. 底轨
+      canvas.drawRRect(rrect, bgPaint);
+
+      final double hoverFill =
+          isHovered ? ((slider - seg.start) / span).clamp(0.0, 1.0) : 0.0;
+      final double bufferFill =
+          ((bufferPercent - seg.start) / span).clamp(0.0, 1.0);
+      final double positionFill =
+          ((currentPercent - seg.start) / span).clamp(0.0, 1.0);
+
+      if (hoverFill <= 0 && bufferFill <= 0 && positionFill <= 0) {
+        continue;
+      }
+
+      canvas.save();
+      canvas.clipRRect(rrect);
+
+      if (hoverFill > 0) {
+        canvas.drawRect(
+          Rect.fromLTWH(left, top, width * hoverFill, h),
+          hoverPaint,
+        );
+      }
+      if (bufferFill > 0) {
+        canvas.drawRect(
+          Rect.fromLTWH(left, top, width * bufferFill, h),
+          bufPaint,
+        );
+      }
+      if (positionFill > 0) {
+        canvas.drawRect(
+          Rect.fromLTWH(left, top, width * positionFill, h),
+          posPaint,
+        );
+      }
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SegmentedSeekBarPainter old) {
+    return old.segments != segments ||
+        old.slider != slider ||
+        old.bufferPercent != bufferPercent ||
+        old.positionPercent != positionPercent ||
+        old.isHovered != isHovered ||
+        old.isClick != isClick ||
+        old.normalHeight != normalHeight ||
+        old.hoverHeight != hoverHeight ||
+        old.backgroundColor != backgroundColor ||
+        old.hoverColor != hoverColor ||
+        old.bufferColor != bufferColor ||
+        old.positionColor != positionColor;
   }
 }
 
@@ -2487,17 +2757,30 @@ class _CustomTrackShape extends RoundedRectSliderTrackShape {
 
 class _DanmakuHeatmapPainter extends CustomPainter {
   final List<double> heatmap;
-  final Color color;
+  final Color playedColor;
+  final Color unplayedColor;
+  final double playedProgress;
+  final double bufferProgress;
+  final Color? bufferColor;
 
-  _DanmakuHeatmapPainter(this.heatmap, this.color);
+  _DanmakuHeatmapPainter({
+    required this.heatmap,
+    required this.playedColor,
+    required this.unplayedColor,
+    required this.playedProgress,
+    this.bufferProgress = 0.0,
+    this.bufferColor,
+  });
 
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (heatmap.isEmpty) return;
+  static Path? _cachedPath;
+  static int? _cachedHeatmapHash;
+  static Size? _cachedSize;
 
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill;
+  Path _getPath(Size size) {
+    final int hash = Object.hash(identityHashCode(heatmap), heatmap.length);
+    if (_cachedPath != null && _cachedHeatmapHash == hash && _cachedSize == size) {
+      return _cachedPath!;
+    }
 
     final path = Path();
     final double stepX = size.width / (heatmap.length - 1);
@@ -2530,12 +2813,63 @@ class _DanmakuHeatmapPainter extends CustomPainter {
     path.lineTo(size.width, size.height);
     path.close();
 
-    canvas.drawPath(path, paint);
+    _cachedPath = path;
+    _cachedHeatmapHash = hash;
+    _cachedSize = size;
+    return path;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (heatmap.isEmpty) return;
+
+    final path = _getPath(size);
+
+    // 1. 绘制整体未播放区域（底色）
+    final unplayedPaint = Paint()
+      ..color = unplayedColor
+      ..style = PaintingStyle.fill;
+    canvas.drawPath(path, unplayedPaint);
+
+    // 2. 绘制缓冲区域（如果 bufferProgress > 0 且有 bufferColor）
+    final double clampedBuffer = bufferProgress.clamp(0.0, 1.0);
+    final double clampedPlayed = playedProgress.clamp(0.0, 1.0);
+
+    if (bufferColor != null && clampedBuffer > 0) {
+      final bufferPaint = Paint()
+        ..color = bufferColor!
+        ..style = PaintingStyle.fill;
+      canvas.save();
+      canvas.clipRect(
+        Rect.fromLTWH(0, 0, size.width * clampedBuffer, size.height),
+      );
+      canvas.drawPath(path, bufferPaint);
+      canvas.restore();
+    }
+
+    // 3. 绘制已播放区域（高亮色）
+    if (clampedPlayed > 0) {
+      final playedPaint = Paint()
+        ..color = playedColor
+        ..style = PaintingStyle.fill;
+      canvas.save();
+      canvas.clipRect(
+        Rect.fromLTWH(0, 0, size.width * clampedPlayed, size.height),
+      );
+      canvas.drawPath(path, playedPaint);
+      canvas.restore();
+    }
   }
 
   @override
   bool shouldRepaint(covariant _DanmakuHeatmapPainter oldDelegate) {
-    if (oldDelegate.color != color) return true;
+    if (oldDelegate.playedProgress != playedProgress ||
+        oldDelegate.bufferProgress != bufferProgress ||
+        oldDelegate.playedColor != playedColor ||
+        oldDelegate.unplayedColor != unplayedColor ||
+        oldDelegate.bufferColor != bufferColor) {
+      return true;
+    }
     if (oldDelegate.heatmap.length != heatmap.length) return true;
     for (int i = 0; i < heatmap.length; i++) {
       if (oldDelegate.heatmap[i] != heatmap[i]) return true;
