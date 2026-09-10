@@ -80,7 +80,11 @@ class InitializerNativeCallable {
       while (true) {
         final event = mpv.mpv_wait_event(ctx, 0);
         if (event == nullptr) return;
-        if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_NONE) return;
+        if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_NONE) {
+          // Command replies may precede logs; forward the drained-queue boundary.
+          await _eventCallbacks[ctx.address]?.call(event);
+          return;
+        }
         await _eventCallbacks[ctx.address]?.call(event);
       }
     });

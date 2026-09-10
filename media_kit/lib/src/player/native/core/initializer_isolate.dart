@@ -155,10 +155,10 @@ class InitializerIsolate {
       if (disposed) {
         break;
       }
-      if (event.ref.event_id != generated.mpv_event_id.MPV_EVENT_NONE) {
-        port.send(event.address);
-        await completer.future;
-      } else {
+      // Include NONE so command-scoped diagnostics can finish after queued logs.
+      port.send(event.address);
+      await completer.future;
+      if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_NONE) {
         await Future.delayed(Duration.zero);
       }
     }

@@ -34,6 +34,7 @@ import 'package:media_kit/src/player/native/utils/android_asset_loader.dart';
 import 'package:media_kit/src/player/native/utils/android_helper.dart';
 import 'package:media_kit/src/player/native/utils/isolates.dart';
 import 'package:media_kit/src/player/native/utils/native_reference_holder.dart';
+import 'package:media_kit/src/player/native/utils/subtitle_error_router.dart';
 import 'package:media_kit/src/player/native/utils/temp_file.dart';
 import 'package:media_kit/src/player/platform_player.dart';
 
@@ -86,6 +87,14 @@ void nativeEnsureInitialized({String? libmpv}) {
 ///
 /// {@endtemplate}
 class NativePlayer extends PlatformPlayer {
+  late final _subtitleErrorRouter = NativeSubtitleErrorRouter(
+    emitError: (error) {
+      if (!errorController.isClosed) errorController.add(error);
+    },
+  );
+  final _pendingSubtitleCompletions =
+      <({Object token, bool failed, Completer<void> done})>[];
+
   /// {@macro native_player}
   NativePlayer({required super.configuration})
       : mpv = generated.MPV(DynamicLibrary.open(NativeLibrary.path)) {
@@ -111,6 +120,8 @@ class NativePlayer extends PlatformPlayer {
       await stop(notify: false, synchronized: false);
 
       disposed = true;
+      _subtitleErrorRouter.reset();
+      _completeSubtitleCommands();
 
       await super.dispose();
 
@@ -1461,6 +1472,10 @@ class NativePlayer extends PlatformPlayer {
   }
 
   Future<void> _handler(Pointer<generated.mpv_event> event) async {
+    if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_NONE) {
+      _completeSubtitleCommands();
+      return;
+    }
     if (event.ref.event_id ==
         generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE) {
       // Following properties are unrelated to the playback lifecycle. Thus, these can be accessed before initialization is complete.
@@ -1592,6 +1607,12 @@ class NativePlayer extends PlatformPlayer {
     }
 
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_START_FILE) {
+      final playlist = state.playlist;
+      _subtitleErrorRouter.reset(
+        mediaUri: playlist.index >= 0 && playlist.index < playlist.medias.length
+            ? playlist.medias[playlist.index].uri
+            : null,
+      );
       if (isPlayingStateChangeAllowed) {
         state = state.copyWith(
           playing: true,
@@ -1607,6 +1628,15 @@ class NativePlayer extends PlatformPlayer {
       state = state.copyWith(buffering: true);
       if (!bufferingController.isClosed) {
         bufferingController.add(true);
+      }
+    }
+    if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_END_FILE &&
+        event.ref.data != nullptr) {
+      final ended = event.ref.data.cast<generated.mpv_event_end_file>().ref;
+      if (ended.reason == generated.mpv_end_file_reason.MPV_END_FILE_REASON_ERROR) {
+        final message = mpv.mpv_error_string(ended.error).cast<Utf8>().toDartString();
+        // This event belongs to the main media, never to a failed sub-add.
+        _subtitleErrorRouter.playbackFailed('Failed to open media ($message)');
       }
     }
     if (event.ref.event_id ==
@@ -2193,40 +2223,7 @@ class NativePlayer extends PlatformPlayer {
         // --------------------------------------------------
         // Emit error(s) based on the log messages.
         if (level == 'error') {
-          if (prefix == 'file') {
-            // file:// not found.
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
-          }
-          if (prefix == 'ffmpeg') {
-            if (text.startsWith('tcp:')) {
-              // http:// error of any kind.
-              if (!errorController.isClosed) {
-                errorController.add(text);
-              }
-            }
-          }
-          if (prefix == 'vd') {
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
-          }
-          if (prefix == 'ad') {
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
-          }
-          if (prefix == 'cplayer') {
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
-          }
-          if (prefix == 'stream') {
-            if (!errorController.isClosed) {
-              errorController.add(text);
-            }
-          }
+          _subtitleErrorRouter.logError(prefix, text);
         }
         // --------------------------------------------------
       }
@@ -2780,26 +2777,52 @@ class NativePlayer extends PlatformPlayer {
       (arr + i).value = pointers[i];
     }
 
-    if (configuration.async) {
-      final requestNumber = _asyncRequestNumber++;
-      final completer = _commandRequests[requestNumber] = Completer<int>();
-      final immediate = mpv.mpv_command_async(ctx, requestNumber, arr.cast());
-      final text = '_command(${args.join(', ')})';
-      if (immediate < 0) {
-        // Sending failed.
-        _commandRequests.remove(requestNumber);
-        _logError(immediate, text);
-        calloc.free(arr);
-        pointers.forEach(calloc.free);
-        return;
+    final subtitleLoad = args.length > 1 && args.first == 'sub-add'
+        ? _subtitleErrorRouter.begin(args[1])
+        : null;
+    var result = -1;
+    try {
+      if (configuration.async) {
+        final requestNumber = _asyncRequestNumber++;
+        final completer = _commandRequests[requestNumber] = Completer<int>();
+        final immediate = mpv.mpv_command_async(ctx, requestNumber, arr.cast());
+        final text = '_command(${args.join(', ')})';
+        if (immediate < 0) {
+          // Sending failed.
+          _commandRequests.remove(requestNumber);
+          result = immediate;
+          _logError(immediate, text);
+          return;
+        }
+        result = await completer.future;
+        _logError(result, text);
+      } else {
+        result = mpv.mpv_command(ctx, arr.cast());
       }
-      _logError(await completer.future, text);
-    } else {
-      mpv.mpv_command(ctx, arr.cast());
+    } finally {
+      calloc.free(arr);
+      pointers.forEach(calloc.free);
+      if (subtitleLoad != null) {
+        if (!disposed) {
+          final done = Completer<void>();
+          _pendingSubtitleCompletions.add(
+              (token: subtitleLoad, failed: result < 0, done: done));
+          mpv.mpv_wakeup(ctx);
+          await done.future;
+        } else {
+          _subtitleErrorRouter.finish(subtitleLoad, failed: result < 0);
+        }
+      }
     }
+  }
 
-    calloc.free(arr);
-    pointers.forEach(calloc.free);
+  void _completeSubtitleCommands() {
+    final pending = _pendingSubtitleCompletions.toList();
+    _pendingSubtitleCompletions.clear();
+    for (final completion in pending) {
+      _subtitleErrorRouter.finish(completion.token, failed: completion.failed);
+      completion.done.complete();
+    }
   }
 
   String _sanitizeUri(String uri) {
