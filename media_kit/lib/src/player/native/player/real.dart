@@ -2944,7 +2944,8 @@ Uint8List? _screenshot(_ScreenshotData data) {
   final pointers = args.map<Pointer<Utf8>>((e) {
     return e.toNativeUtf8();
   }).toList();
-  final Pointer<Pointer<Utf8>> arr = calloc.allocate(args.join().length);
+  // mpv_command_ret expects pointers followed by a null pointer, not text bytes.
+  final arr = calloc<Pointer<Utf8>>(args.length + 1);
   for (int i = 0; i < args.length; i++) {
     arr[i] = pointers[i];
   }
