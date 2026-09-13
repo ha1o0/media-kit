@@ -201,6 +201,12 @@ class MaterialVideoControlsThemeData {
   /// Builder for the buffering indicator.
   final Widget Function(BuildContext)? bufferingIndicatorBuilder;
 
+  /// Optional centered overlay that follows the controls visibility.
+  ///
+  /// Unlike [primaryButtonBar], this remains mounted while hidden so stateful
+  /// overlays can retain playback history across auto-hide transitions.
+  final Widget? centerOverlay;
+
   /// Custom builder for volume indicator.
   final Widget Function(BuildContext, double)? volumeIndicatorBuilder;
 
@@ -324,6 +330,7 @@ class MaterialVideoControlsThemeData {
     this.controlsHoverDuration = const Duration(seconds: 3),
     this.controlsTransitionDuration = const Duration(milliseconds: 300),
     this.bufferingIndicatorBuilder,
+    this.centerOverlay,
     this.volumeIndicatorBuilder,
     this.brightnessIndicatorBuilder,
     this.onVolumeChanged,
@@ -392,6 +399,7 @@ class MaterialVideoControlsThemeData {
     Duration? controlsHoverDuration,
     Duration? controlsTransitionDuration,
     Widget Function(BuildContext)? bufferingIndicatorBuilder,
+    Widget? centerOverlay,
     Widget Function(BuildContext, double)? volumeIndicatorBuilder,
     Widget Function(BuildContext, double)? brightnessIndicatorBuilder,
     void Function(double)? onVolumeChanged,
@@ -462,6 +470,7 @@ class MaterialVideoControlsThemeData {
           controlsTransitionDuration ?? this.controlsTransitionDuration,
       bufferingIndicatorBuilder:
           bufferingIndicatorBuilder ?? this.bufferingIndicatorBuilder,
+      centerOverlay: centerOverlay ?? this.centerOverlay,
       volumeIndicatorBuilder:
           volumeIndicatorBuilder ?? this.volumeIndicatorBuilder,
       brightnessIndicatorBuilder:
@@ -1078,6 +1087,16 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
                                 ],
                               ),
                             ],
+                          ),
+                        ),
+                      if (_theme(context).centerOverlay != null)
+                        IgnorePointer(
+                          ignoring: !visible,
+                          child: ExcludeSemantics(
+                            excluding: !visible,
+                            child: Center(
+                              child: _theme(context).centerOverlay,
+                            ),
                           ),
                         ),
                     ],

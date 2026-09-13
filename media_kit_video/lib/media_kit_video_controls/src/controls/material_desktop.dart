@@ -293,6 +293,12 @@ class MaterialDesktopVideoControlsThemeData {
   /// Builder for the buffering indicator.
   final Widget Function(BuildContext)? bufferingIndicatorBuilder;
 
+  /// Optional centered overlay that follows the controls visibility.
+  ///
+  /// Unlike [primaryButtonBar], this remains mounted while hidden so stateful
+  /// overlays can retain playback history across auto-hide transitions.
+  final Widget? centerOverlay;
+
   // BUTTON BAR
 
   /// Buttons to be displayed in the primary button bar.
@@ -433,6 +439,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.useBoundedControlsOpacityLayers = false,
     this.preserveLegacyGradientExtents = false,
     this.bufferingIndicatorBuilder,
+    this.centerOverlay,
     this.primaryButtonBar = const [],
     this.topButtonBar = const [],
     this.topButtonBarMargin = const EdgeInsets.symmetric(horizontal: 16.0),
@@ -497,6 +504,7 @@ class MaterialDesktopVideoControlsThemeData {
     bool? useBoundedControlsOpacityLayers,
     bool? preserveLegacyGradientExtents,
     Widget Function(BuildContext)? bufferingIndicatorBuilder,
+    Widget? centerOverlay,
     List<Widget>? topButtonBar,
     EdgeInsets? topButtonBarMargin,
     List<Widget>? bottomButtonBar,
@@ -553,6 +561,7 @@ class MaterialDesktopVideoControlsThemeData {
           controlsHoverDuration ?? this.controlsHoverDuration,
       bufferingIndicatorBuilder:
           bufferingIndicatorBuilder ?? this.bufferingIndicatorBuilder,
+      centerOverlay: centerOverlay ?? this.centerOverlay,
       controlsTransitionDuration:
           controlsTransitionDuration ?? this.controlsTransitionDuration,
       keepControlsMounted: keepControlsMounted ?? this.keepControlsMounted,
@@ -1180,6 +1189,16 @@ class _MaterialDesktopVideoControlsState
                                       ],
                                     ),
                                   ),
+                                if (_theme(context).centerOverlay != null)
+                                  IgnorePointer(
+                                    ignoring: !visible,
+                                    child: ExcludeSemantics(
+                                      excluding: !visible,
+                                      child: Center(
+                                        child: _theme(context).centerOverlay,
+                                      ),
+                                    ),
+                                  ),
                               ],
                             ),
                           ),
@@ -1463,6 +1482,24 @@ class _BoundedMaterialDesktopControlsChrome extends StatelessWidget {
                 ],
               ),
             ),
+            if (theme.centerOverlay != null)
+              Positioned.fill(
+                child: IgnorePointer(
+                  ignoring: !visible,
+                  child: ExcludeSemantics(
+                    excluding: !visible,
+                    child: Center(
+                      child: RepaintBoundary(
+                        child: _buildOpacity(
+                          theme: theme,
+                          visible: visible,
+                          child: theme.centerOverlay!,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
           ],
         );
       },
