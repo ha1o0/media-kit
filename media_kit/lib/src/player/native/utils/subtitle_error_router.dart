@@ -1,3 +1,5 @@
+import 'dart:async';
+
 /// Keeps failed external-subtitle commands out of primary playback recovery.
 /// Unscoped transport diagnostics wait for the command and its queued logs;
 /// explicit media/decoder failures always remain playback errors.
@@ -124,6 +126,58 @@ class NativeSubtitleErrorRouter {
             text.contains('"$value"') ||
             text.contains("'$value'")));
   }
+}
+
+/// Waits briefly for log messages queued behind a subtitle command.
+///
+/// A drained libmpv event queue completes the wait immediately. The timeout is
+/// a safety net for renderers which continuously emit logs and therefore never
+/// produce an idle queue boundary.
+class NativeSubtitleLogDrainBarrier {
+  static const Duration defaultTimeout = Duration(milliseconds: 500);
+
+  final Duration timeout;
+  final void Function(Object token, {required bool failed}) finish;
+  final List<_PendingSubtitleLogDrain> _pending = [];
+
+  NativeSubtitleLogDrainBarrier({
+    required this.finish,
+    this.timeout = defaultTimeout,
+  });
+
+  Future<void> wait({required Object token, required bool failed}) {
+    final pending = _PendingSubtitleLogDrain(token, failed);
+    _pending.add(pending);
+    pending.timer = Timer(timeout, () => _complete(pending));
+    return pending.completer.future;
+  }
+
+  void completeAll() {
+    for (final pending in _pending.toList(growable: false)) {
+      _complete(pending);
+    }
+  }
+
+  void _complete(_PendingSubtitleLogDrain pending) {
+    if (!_pending.remove(pending)) return;
+    pending.timer?.cancel();
+    try {
+      finish(pending.token, failed: pending.failed);
+    } finally {
+      if (!pending.completer.isCompleted) {
+        pending.completer.complete();
+      }
+    }
+  }
+}
+
+class _PendingSubtitleLogDrain {
+  final Object token;
+  final bool failed;
+  final Completer<void> completer = Completer<void>();
+  Timer? timer;
+
+  _PendingSubtitleLogDrain(this.token, this.failed);
 }
 
 class _SubtitleLoad {

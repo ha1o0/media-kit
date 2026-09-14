@@ -92,8 +92,9 @@ class NativePlayer extends PlatformPlayer {
       if (!errorController.isClosed) errorController.add(error);
     },
   );
-  final _pendingSubtitleCompletions =
-      <({Object token, bool failed, Completer<void> done})>[];
+  late final _subtitleLogDrainBarrier = NativeSubtitleLogDrainBarrier(
+    finish: _subtitleErrorRouter.finish,
+  );
 
   /// {@macro native_player}
   NativePlayer({required super.configuration})
@@ -121,7 +122,7 @@ class NativePlayer extends PlatformPlayer {
 
       disposed = true;
       _subtitleErrorRouter.reset();
-      _completeSubtitleCommands();
+      _subtitleLogDrainBarrier.completeAll();
 
       await super.dispose();
 
@@ -1473,7 +1474,7 @@ class NativePlayer extends PlatformPlayer {
 
   Future<void> _handler(Pointer<generated.mpv_event> event) async {
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_NONE) {
-      _completeSubtitleCommands();
+      _subtitleLogDrainBarrier.completeAll();
       return;
     }
     if (event.ref.event_id ==
@@ -2804,24 +2805,16 @@ class NativePlayer extends PlatformPlayer {
       pointers.forEach(calloc.free);
       if (subtitleLoad != null) {
         if (!disposed) {
-          final done = Completer<void>();
-          _pendingSubtitleCompletions.add(
-              (token: subtitleLoad, failed: result < 0, done: done));
+          final logDrain = _subtitleLogDrainBarrier.wait(
+            token: subtitleLoad,
+            failed: result < 0,
+          );
           mpv.mpv_wakeup(ctx);
-          await done.future;
+          await logDrain;
         } else {
           _subtitleErrorRouter.finish(subtitleLoad, failed: result < 0);
         }
       }
-    }
-  }
-
-  void _completeSubtitleCommands() {
-    final pending = _pendingSubtitleCompletions.toList();
-    _pendingSubtitleCompletions.clear();
-    for (final completion in pending) {
-      _subtitleErrorRouter.finish(completion.token, failed: completion.failed);
-      completion.done.complete();
     }
   }
 
