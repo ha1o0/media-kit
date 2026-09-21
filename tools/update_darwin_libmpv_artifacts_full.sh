@@ -21,7 +21,8 @@ Example:
   tools/update_darwin_libmpv_artifacts_full.sh v2.19.4 --dry-run
 
 This script reads GitHub release asset digests and updates Darwin libmpv artifact
-versions/checksums for full builds (flavor=full).
+versions/checksums for full builds (flavor=full), then refreshes the downloaded
+XCFrameworks for macOS/iOS audio and video packages.
 EOF
 }
 
@@ -271,6 +272,25 @@ update_artifact \
   "Uchardet" \
   "Xml2"
 
+build_darwin_libmpv_dependencies() {
+  local package_dir
+  local package_dirs=(
+    "libs/ios/media_kit_libs_ios_audio/ios"
+    "libs/ios/media_kit_libs_ios_video/ios"
+    "libs/macos/media_kit_libs_macos_audio/macos"
+    "libs/macos/media_kit_libs_macos_video/macos"
+  )
+
+  for package_dir in "${package_dirs[@]}"; do
+    echo "Cleaning ${package_dir}..."
+    make -C "${package_dir}" clean
+    echo "Building ${package_dir}..."
+    make -C "${package_dir}"
+  done
+}
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  echo "Dry run completed. No files were changed."
+  echo "Dry run completed. No files were changed or built."
+else
+  build_darwin_libmpv_dependencies
 fi
