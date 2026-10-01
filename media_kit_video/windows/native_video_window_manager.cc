@@ -5,6 +5,7 @@
 #endif
 
 #include "native_video_window_manager.h"
+#include "native_video_window_sync.h"
 
 #include <algorithm>
 #include <cmath>
@@ -365,13 +366,13 @@ int NativeVideoWindowManager::Sync(Entry& entry) {
                         !::IsIconic(flutter_window_) && entry.width > 0.0 &&
                         entry.height > 0.0;
   if (!can_show) {
-    if (entry.window) ::ShowWindow(entry.window, SW_HIDE);
+    HideNativeVideoWindow(entry.window);
     return finish(status);
   }
 
   POINT view_origin{0, 0};
   if (!::ClientToScreen(flutter_view, &view_origin)) {
-    ::ShowWindow(entry.window, SW_HIDE);
+    HideNativeVideoWindow(entry.window);
     return finish(status);
   }
   status |= 1 << 8;
@@ -405,8 +406,7 @@ int NativeVideoWindowManager::Sync(Entry& entry) {
   // composition without hiding the host (Alt+F4 and window lifecycle remain).
   const HWND insert_after =
       entry.video_above_flutter ? HWND_TOP : flutter_window_;
-  if (::SetWindowPos(entry.window, insert_after, x, y, width, height,
-                     SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW)) {
+  if (SyncNativeVideoWindow(entry.window, insert_after, x, y, width, height)) {
     status |= 1 << 9;
   }
   return finish(status);
