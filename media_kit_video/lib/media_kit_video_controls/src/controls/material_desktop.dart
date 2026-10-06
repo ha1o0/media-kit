@@ -1972,25 +1972,23 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                     ),
                   ),
                   Positioned(
-                    left: click
-                        ? (constraints.maxWidth -
-                                _theme(context).seekBarThumbSize / 2) *
-                            slider
-                        : (constraints.maxWidth -
-                                _theme(context).seekBarThumbSize / 2) *
-                            positionPercent,
-                    child: AnimatedContainer(
-                      width: hover || click
-                          ? _theme(context).seekBarThumbSize
-                          : 0.0,
-                      height: hover || click
-                          ? _theme(context).seekBarThumbSize
-                          : 0.0,
-                      duration: _theme(context).seekBarThumbTransitionDuration,
-                      decoration: BoxDecoration(
-                        color: _theme(context).seekBarThumbColor,
-                        borderRadius: BorderRadius.circular(
-                          _theme(context).seekBarThumbSize / 2,
+                    left: constraints.maxWidth *
+                        (click ? slider : positionPercent),
+                    child: FractionalTranslation(
+                      translation: const Offset(-0.5, 0.0),
+                      child: AnimatedContainer(
+                        width: hover || click
+                            ? _theme(context).seekBarThumbSize
+                            : 0.0,
+                        height: hover || click
+                            ? _theme(context).seekBarThumbSize
+                            : 0.0,
+                        duration: _theme(context).seekBarThumbTransitionDuration,
+                        decoration: BoxDecoration(
+                          color: _theme(context).seekBarThumbColor,
+                          borderRadius: BorderRadius.circular(
+                            _theme(context).seekBarThumbSize / 2,
+                          ),
                         ),
                       ),
                     ),
