@@ -3,6 +3,7 @@ import 'dart:async';
 /// Keeps failed external-subtitle commands out of primary playback recovery.
 /// Unscoped transport diagnostics wait for the command and its queued logs;
 /// explicit media/decoder failures always remain playback errors.
+/// Audio decoder diagnostics retain their source for playback classification.
 class NativeSubtitleErrorRouter {
   final void Function(String error) emitError;
   final _loads = <Object, _SubtitleLoad>{};
@@ -80,12 +81,27 @@ class NativeSubtitleErrorRouter {
       return;
     }
 
-    if (prefix != 'ad') {
+    // cplayer also reports failures local to the audio chain. They must not
+    // turn a concurrent failed subtitle request into a primary-media failure.
+    const audioOnlyPlayerErrors = {
+      'Audio filter initialized failed!',
+      'Passthrough format unsupported.',
+      'Could not open/initialize audio device -> no sound.',
+      'Error reinitializing audio.',
+    };
+    final isAudioOnlyError = prefix == 'ad' ||
+        (prefix == 'cplayer' && audioOnlyPlayerErrors.contains(text));
+    if (!isAudioOnlyError) {
       for (final load in _loads.values) {
         load.sawPlaybackError = true;
       }
     }
-    emitError(text);
+    // Detailed audio errors can precede the shared initialization failure,
+    // including when mpv can recover by selecting another decoder itself.
+    final preserveDecoderSource = prefix == 'ad' ||
+        (prefix == 'vd' &&
+            text.startsWith('Failed to initialize a decoder for codec '));
+    emitError(preserveDecoderSource ? '[$prefix] $text' : text);
   }
 
   bool _targetsOnlyPrimaryEndpoint(String text) {
