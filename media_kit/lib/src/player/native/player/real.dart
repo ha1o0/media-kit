@@ -2721,7 +2721,8 @@ class NativePlayer extends PlatformPlayer {
   }
 
   Future<void> _setPropertyFlag(String name, bool value) async {
-    final ptr = calloc<Bool>(1)..value = value;
+    // MPV_FORMAT_FLAG takes a C int, not a one-byte C/C++ bool.
+    final ptr = calloc<Int32>(1)..value = value ? 1 : 0;
     await _setProperty(
       name,
       generated.mpv_format.MPV_FORMAT_FLAG,
