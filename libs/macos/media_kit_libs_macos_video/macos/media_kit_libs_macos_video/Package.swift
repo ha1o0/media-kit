@@ -24,26 +24,26 @@ let libmpvTargets = [
     "Xml2"
 ]
 
-let libmpvArtifactBase = "https://github.com/ha1o0/libmpv-darwin-build/releases/download/v2.22.2/libmpv-xcframeworks_v2.22.2_macos-universal-video-full"
+let libmpvArtifactBase = "https://github.com/ha1o0/libmpv-darwin-build/releases/download/v2.23.1/libmpv-xcframeworks_v2.23.1_macos-universal-video-full"
 let libmpvChecksums = [
-    "Ass": "309fb9751414dc9bda5004f814c33a74923990cc976ba18d928423d7990d3ff3",
-    "Avcodec": "8474e8cc80185e5603f5e598a855103f8a390422f8f58eb717a9bc0ef46861e1",
-    "Avfilter": "eb68848912775e0a81a2c914d2dd1600d6526465868c7188f1693bc76517b524",
-    "Avformat": "76616d5bd62197e4c646881a7d49f8f59755fa3a297f62349097e6a517eeb3ff",
-    "Avutil": "04ff2202592c2f80b5724fe214e743bd39362d11c7cb2533285be99d67a82f5f",
-    "Dav1d": "ba4499822b72ac8f0a437f2cbec699f219a6949b2d7cfbcaeec97eeeb6fa0fb6",
-    "Freetype": "cf5681912c2b804d6f9380ff543d2b78d9dbe0fb0f12cf91ff9259357992f7ec",
-    "Fribidi": "51c4283a8024a5d621e3a646919a392ec43b7462525827ad42f97f5d175fa7fb",
-    "Harfbuzz": "27dea16e1479ca195fed6c55ba0b2c1bf99a19c7dd9104af5475eac25401f849",
-    "Mbedcrypto": "2ff1236b7d24cd1f7bb2a9c3bf50d4de78e58481f0b437321e93df8d38c14c7c",
-    "Mbedtls": "1bf9cd707ef55ef928f83d6b4b4f6efb5c10f19fced4b15d4d9ed7a0dc26dcb2",
-    "Mbedx509": "3ef6c568426cb30a51218fba789863366aab3043fbd46fe95c8e493251cb8b85",
-    "Mpv": "e67c0f3dfc51d5df18f80c6385b2bf7eaafdddaf53a8ba2bc13f05de0bd5d1ed",
-    "Png16": "ce89df1a75bd0288d5599e93ebfd9a17ff19dc26bbbd2f76558c944865099949",
-    "Swresample": "ab4fdc92e7340d80ad643457020b3d9b1963a7ea68913ad322e9331a2ea5e219",
-    "Swscale": "bf6e0a61f41c47bc0aff07e835c61a23095ba97211681e9ec46bfbe350ea6269",
-    "Uchardet": "5d686427d85d15ee5726857d1947201afd6b538323f8ca55d0fe2add3bce7f3c",
-    "Xml2": "b24a41f572698298d54d7ffef946506ee51d2854bfcc2ce52cef4b44a0b90cea"
+    "Ass": "5bdda43fc6002de49ffa84827bd4c5aba087f4781121cd7187a2e08ed7b7d9b9",
+    "Avcodec": "3f0253d1c74e79bd65e6101c5081dd6d21177f9f2871d2738d6ba77a2d175811",
+    "Avfilter": "e0f2fea8f22799b323a03e22f2e74bb84b887385b40add09b41d0fbea638100c",
+    "Avformat": "d3b3cf63581b46128fbff98dee946ae87ef7db5822e3c6da9bc95ca62f7a46e9",
+    "Avutil": "60367792604f463878f1711786bb53bc04ef32a509dee99270bca1e4cc996b29",
+    "Dav1d": "dd5b2868a7560aca0f65fd63909607d5a4420a3be65c494d1db04012d41d2380",
+    "Freetype": "073a1a8b5198ab26c19a7e012a6810d18975caf861438e13e812324911260eab",
+    "Fribidi": "3e30162a754db2e5e9b8eac3205d82e5d0c1694cc73b834934770bb796483cd7",
+    "Harfbuzz": "7448920c0e4abce54359ed563e637c734051c11240297af58db389aac63f2cf0",
+    "Mbedcrypto": "0575befa0b6e196172373d8a9cf012a352182fe35c7ac7f914904d99b3a19c26",
+    "Mbedtls": "fd1009f71d4a805fd92065a94b147211919e6d8f8452e4c7db509b374f2beb5f",
+    "Mbedx509": "91aa28e2c78b70feac4c8acc661ac310aeae49a0af0233a6496dee8220a036ed",
+    "Mpv": "a2a56c490247badb80b4ce54accc8e80a2d8a51e53d7343d1c6a0912486b869f",
+    "Png16": "9c34ed9cf14a901bc27854786c174e9270fd61439eda93ad0d6417b1ebe80870",
+    "Swresample": "3d34cae2a9ef583321c4ba832a3e68816487334305c1c763a37f2f092fc59a1d",
+    "Swscale": "a8207d9b3ab80f8e4d01b87083465a69a3d2152d5a1bb474c650c62c938d317b",
+    "Uchardet": "46736929fad6e1defbbfb4d27fcb00705dd2e3c916d68b54283fe0b447209f61",
+    "Xml2": "f46c425157cd9b961540643c9778547e8e6617036083f2a5b892dc71742b4dc8"
 ]
 let libmpvProductTargets: [String] = ["media_kit_libs_macos_video"] + libmpvTargets
 
