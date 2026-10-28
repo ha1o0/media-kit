@@ -377,6 +377,10 @@ class MaterialDesktopVideoControlsThemeData {
   /// Width of independent seek bar markers.
   final double seekBarMarkerWidth;
 
+  /// Optional overlay painted over the seek bar track. The overlay must not
+  /// handle pointer events itself.
+  final Widget? seekBarOverlay;
+
   // VOLUME BAR
 
   /// [Color] of the volume bar.
@@ -472,6 +476,7 @@ class MaterialDesktopVideoControlsThemeData {
     this.seekBarMarkers = const [],
     this.seekBarMarkerColor = const Color(0xFFFFFFFF),
     this.seekBarMarkerWidth = 2.0,
+    this.seekBarOverlay,
     this.volumeBarColor = const Color(0x3DFFFFFF),
     this.volumeBarActiveColor = const Color(0xFFFFFFFF),
     this.volumeBarThumbSize = 12.0,
@@ -528,6 +533,7 @@ class MaterialDesktopVideoControlsThemeData {
     List<double>? seekBarMarkers,
     Color? seekBarMarkerColor,
     double? seekBarMarkerWidth,
+    Widget? seekBarOverlay,
     Color? volumeBarColor,
     Color? volumeBarActiveColor,
     double? volumeBarThumbSize,
@@ -597,6 +603,7 @@ class MaterialDesktopVideoControlsThemeData {
       seekBarMarkers: seekBarMarkers ?? this.seekBarMarkers,
       seekBarMarkerColor: seekBarMarkerColor ?? this.seekBarMarkerColor,
       seekBarMarkerWidth: seekBarMarkerWidth ?? this.seekBarMarkerWidth,
+      seekBarOverlay: seekBarOverlay ?? this.seekBarOverlay,
       volumeBarColor: volumeBarColor ?? this.volumeBarColor,
       volumeBarActiveColor: volumeBarActiveColor ?? this.volumeBarActiveColor,
       volumeBarThumbSize: volumeBarThumbSize ?? this.volumeBarThumbSize,
@@ -1968,6 +1975,12 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                             ),
                           );
                         }),
+                          if (_theme(context).seekBarOverlay != null)
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: _theme(context).seekBarOverlay!,
+                              ),
+                            ),
                       ],
                     ),
                   ),

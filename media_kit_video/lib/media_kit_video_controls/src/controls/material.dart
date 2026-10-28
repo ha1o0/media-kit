@@ -297,6 +297,10 @@ class MaterialVideoControlsThemeData {
   /// Width of independent seek bar markers.
   final double seekBarMarkerWidth;
 
+  /// Optional overlay painted over the seek bar track. The overlay must not
+  /// handle pointer events itself.
+  final Widget? seekBarOverlay;
+
   /// [Alignment] of seek bar inside the seek bar container.
   final Alignment seekBarAlignment;
 
@@ -371,6 +375,7 @@ class MaterialVideoControlsThemeData {
     this.seekBarMarkers = const [],
     this.seekBarMarkerColor = const Color(0xFFFFFFFF),
     this.seekBarMarkerWidth = 2.0,
+    this.seekBarOverlay,
     this.seekBarAlignment = Alignment.bottomCenter,
     this.shiftSubtitlesOnControlsVisibilityChange = false,
   });
@@ -428,6 +433,7 @@ class MaterialVideoControlsThemeData {
     List<double>? seekBarMarkers,
     Color? seekBarMarkerColor,
     double? seekBarMarkerWidth,
+    Widget? seekBarOverlay,
     Alignment? seekBarAlignment,
     bool? shiftSubtitlesOnControlsVisibilityChange,
   }) {
@@ -504,6 +510,7 @@ class MaterialVideoControlsThemeData {
       seekBarMarkers: seekBarMarkers ?? this.seekBarMarkers,
       seekBarMarkerColor: seekBarMarkerColor ?? this.seekBarMarkerColor,
       seekBarMarkerWidth: seekBarMarkerWidth ?? this.seekBarMarkerWidth,
+      seekBarOverlay: seekBarOverlay ?? this.seekBarOverlay,
       seekBarAlignment: seekBarAlignment ?? this.seekBarAlignment,
       shiftSubtitlesOnControlsVisibilityChange:
           shiftSubtitlesOnControlsVisibilityChange ??
@@ -1759,6 +1766,12 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
                               ),
                             );
                           }),
+                          if (_theme(context).seekBarOverlay != null)
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: _theme(context).seekBarOverlay!,
+                              ),
+                            ),
                         ],
                       ),
                     ),
