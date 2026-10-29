@@ -282,6 +282,9 @@ class MaterialVideoControlsThemeData {
   /// [Color] of the playback buffer section in the seek bar.
   final Color seekBarBufferColor;
 
+  /// Optional thinner buffer rail; null follows the primary track's height.
+  final double? seekBarBufferHeight;
+
   /// Size of the seek bar thumb.
   final double seekBarThumbSize;
 
@@ -300,6 +303,9 @@ class MaterialVideoControlsThemeData {
   /// Optional overlay painted over the seek bar track. The overlay must not
   /// handle pointer events itself.
   final Widget? seekBarOverlay;
+
+  /// Read-only secondary track below the timeline. It never covers playback.
+  final Widget? seekBarSecondaryTrack;
 
   /// [Alignment] of seek bar inside the seek bar container.
   final Alignment seekBarAlignment;
@@ -370,12 +376,14 @@ class MaterialVideoControlsThemeData {
     this.seekBarColor = const Color(0x3DFFFFFF),
     this.seekBarPositionColor = const Color(0xFFFF0000),
     this.seekBarBufferColor = const Color(0x3DFFFFFF),
+    this.seekBarBufferHeight,
     this.seekBarThumbSize = 12.8,
     this.seekBarThumbColor = const Color(0xFFFF0000),
     this.seekBarMarkers = const [],
     this.seekBarMarkerColor = const Color(0xFFFFFFFF),
     this.seekBarMarkerWidth = 2.0,
     this.seekBarOverlay,
+    this.seekBarSecondaryTrack,
     this.seekBarAlignment = Alignment.bottomCenter,
     this.shiftSubtitlesOnControlsVisibilityChange = false,
   });
@@ -428,12 +436,14 @@ class MaterialVideoControlsThemeData {
     Color? seekBarColor,
     Color? seekBarPositionColor,
     Color? seekBarBufferColor,
+    double? seekBarBufferHeight,
     double? seekBarThumbSize,
     Color? seekBarThumbColor,
     List<double>? seekBarMarkers,
     Color? seekBarMarkerColor,
     double? seekBarMarkerWidth,
     Widget? seekBarOverlay,
+    Widget? seekBarSecondaryTrack,
     Alignment? seekBarAlignment,
     bool? shiftSubtitlesOnControlsVisibilityChange,
   }) {
@@ -505,12 +515,15 @@ class MaterialVideoControlsThemeData {
       seekBarColor: seekBarColor ?? this.seekBarColor,
       seekBarPositionColor: seekBarPositionColor ?? this.seekBarPositionColor,
       seekBarBufferColor: seekBarBufferColor ?? this.seekBarBufferColor,
+      seekBarBufferHeight: seekBarBufferHeight ?? this.seekBarBufferHeight,
       seekBarThumbSize: seekBarThumbSize ?? this.seekBarThumbSize,
       seekBarThumbColor: seekBarThumbColor ?? this.seekBarThumbColor,
       seekBarMarkers: seekBarMarkers ?? this.seekBarMarkers,
       seekBarMarkerColor: seekBarMarkerColor ?? this.seekBarMarkerColor,
       seekBarMarkerWidth: seekBarMarkerWidth ?? this.seekBarMarkerWidth,
       seekBarOverlay: seekBarOverlay ?? this.seekBarOverlay,
+      seekBarSecondaryTrack:
+          seekBarSecondaryTrack ?? this.seekBarSecondaryTrack,
       seekBarAlignment: seekBarAlignment ?? this.seekBarAlignment,
       shiftSubtitlesOnControlsVisibilityChange:
           shiftSubtitlesOnControlsVisibilityChange ??
@@ -1726,6 +1739,11 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
                   alignment: Alignment.bottomCenter,
                   children: [
                     Container(
+                      margin: EdgeInsets.only(
+                        bottom: _theme(context).seekBarSecondaryTrack == null
+                            ? 0
+                            : 6,
+                      ),
                       width: constraints.maxWidth,
                       height: _theme(context).seekBarHeight,
                       alignment: Alignment.bottomLeft,
@@ -1736,6 +1754,11 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
                         children: [
                           Container(
                             width: constraints.maxWidth * bufferPercent,
+                            height: (_theme(context).seekBarBufferHeight ?? _theme(context).seekBarHeight)
+                                .clamp(0.0, _theme(context).seekBarHeight).toDouble(),
+                            margin: EdgeInsets.only(bottom: (_theme(context).seekBarHeight -
+                                (_theme(context).seekBarBufferHeight ?? _theme(context).seekBarHeight)
+                                    .clamp(0.0, _theme(context).seekBarHeight)) / 2),
                             color: _theme(context).seekBarBufferColor,
                           ),
                           Container(
@@ -1775,21 +1798,40 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
                         ],
                       ),
                     ),
+                    if (_theme(context).seekBarSecondaryTrack != null)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        height: 2,
+                        child: _theme(context).seekBarSecondaryTrack!,
+                      ),
                     Positioned(
-                      left: tapped
-                          ? (constraints.maxWidth -
-                                  _theme(context).seekBarThumbSize / 2) *
-                              slider
-                          : (constraints.maxWidth -
-                                  _theme(context).seekBarThumbSize / 2) *
-                              positionPercent,
+                      left: constraints.maxWidth * (tapped ? slider : positionPercent) -
+                          _theme(context).seekBarThumbSize / 2,
                       bottom: -1.0 * _theme(context).seekBarThumbSize / 2 +
-                          _theme(context).seekBarHeight / 2,
+                          _theme(context).seekBarHeight / 2 +
+                          (_theme(context).seekBarSecondaryTrack == null
+                              ? 0
+                              : 6),
                       child: Container(
                         width: _theme(context).seekBarThumbSize,
                         height: _theme(context).seekBarThumbSize,
                         decoration: BoxDecoration(
                           color: _theme(context).seekBarThumbColor,
+                          border: _theme(context).seekBarSecondaryTrack != null
+                              ? Border.all(
+                                  color: const Color(0x99000000), width: 1)
+                              : null,
+                          boxShadow:
+                              _theme(context).seekBarSecondaryTrack != null
+                                  ? const [
+                                      BoxShadow(
+                                          color: Color(0x66000000),
+                                          blurRadius: 4,
+                                          offset: Offset(0, 1))
+                                    ]
+                                  : null,
                           borderRadius: BorderRadius.circular(
                             _theme(context).seekBarThumbSize / 2,
                           ),

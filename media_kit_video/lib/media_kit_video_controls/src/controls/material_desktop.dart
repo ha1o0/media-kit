@@ -362,6 +362,9 @@ class MaterialDesktopVideoControlsThemeData {
   /// [Color] of the playback buffer section in the seek bar.
   final Color seekBarBufferColor;
 
+  /// Optional thinner buffer rail; null follows the primary track's height.
+  final double? seekBarBufferHeight;
+
   /// Size of the seek bar thumb.
   final double seekBarThumbSize;
 
@@ -380,6 +383,12 @@ class MaterialDesktopVideoControlsThemeData {
   /// Optional overlay painted over the seek bar track. The overlay must not
   /// handle pointer events itself.
   final Widget? seekBarOverlay;
+
+  /// Read-only secondary track below the timeline. It never covers playback.
+  final Widget? seekBarSecondaryTrack;
+
+  /// Keep a small playback thumb visible when the pointer is away.
+  final bool seekBarThumbAlwaysVisible;
 
   // VOLUME BAR
 
@@ -471,12 +480,15 @@ class MaterialDesktopVideoControlsThemeData {
     this.seekBarHoverColor = const Color(0x3DFFFFFF),
     this.seekBarPositionColor = const Color(0xFFFF0000),
     this.seekBarBufferColor = const Color(0x3DFFFFFF),
+    this.seekBarBufferHeight,
     this.seekBarThumbSize = 12.0,
     this.seekBarThumbColor = const Color(0xFFFF0000),
     this.seekBarMarkers = const [],
     this.seekBarMarkerColor = const Color(0xFFFFFFFF),
     this.seekBarMarkerWidth = 2.0,
     this.seekBarOverlay,
+    this.seekBarSecondaryTrack,
+    this.seekBarThumbAlwaysVisible = false,
     this.volumeBarColor = const Color(0x3DFFFFFF),
     this.volumeBarActiveColor = const Color(0xFFFFFFFF),
     this.volumeBarThumbSize = 12.0,
@@ -528,12 +540,15 @@ class MaterialDesktopVideoControlsThemeData {
     Color? seekBarHoverColor,
     Color? seekBarPositionColor,
     Color? seekBarBufferColor,
+    double? seekBarBufferHeight,
     double? seekBarThumbSize,
     Color? seekBarThumbColor,
     List<double>? seekBarMarkers,
     Color? seekBarMarkerColor,
     double? seekBarMarkerWidth,
     Widget? seekBarOverlay,
+    Widget? seekBarSecondaryTrack,
+    bool? seekBarThumbAlwaysVisible,
     Color? volumeBarColor,
     Color? volumeBarActiveColor,
     double? volumeBarThumbSize,
@@ -598,12 +613,17 @@ class MaterialDesktopVideoControlsThemeData {
       seekBarHoverColor: seekBarHoverColor ?? this.seekBarHoverColor,
       seekBarPositionColor: seekBarPositionColor ?? this.seekBarPositionColor,
       seekBarBufferColor: seekBarBufferColor ?? this.seekBarBufferColor,
+      seekBarBufferHeight: seekBarBufferHeight ?? this.seekBarBufferHeight,
       seekBarThumbSize: seekBarThumbSize ?? this.seekBarThumbSize,
       seekBarThumbColor: seekBarThumbColor ?? this.seekBarThumbColor,
       seekBarMarkers: seekBarMarkers ?? this.seekBarMarkers,
       seekBarMarkerColor: seekBarMarkerColor ?? this.seekBarMarkerColor,
       seekBarMarkerWidth: seekBarMarkerWidth ?? this.seekBarMarkerWidth,
       seekBarOverlay: seekBarOverlay ?? this.seekBarOverlay,
+      seekBarSecondaryTrack:
+          seekBarSecondaryTrack ?? this.seekBarSecondaryTrack,
+      seekBarThumbAlwaysVisible:
+          seekBarThumbAlwaysVisible ?? this.seekBarThumbAlwaysVisible,
       volumeBarColor: volumeBarColor ?? this.volumeBarColor,
       volumeBarActiveColor: volumeBarActiveColor ?? this.volumeBarActiveColor,
       volumeBarThumbSize: volumeBarThumbSize ?? this.volumeBarThumbSize,
@@ -1952,69 +1972,96 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                           ),
                           ..._theme(context)
                               .seekBarMarkers
-                            .where(
-                              (marker) => marker > 0.0 && marker < 1.0,
-                            )
-                            .map((marker) {
-                          final markerWidth =
-                              _theme(context).seekBarMarkerWidth;
-                          return Positioned(
-                            left:
-                                constraints.maxWidth * marker - markerWidth / 2,
-                            top: -2.0,
-                            bottom: -2.0,
-                            child: IgnorePointer(
-                              child: Container(
-                                width: markerWidth,
-                                decoration: BoxDecoration(
-                                  color: _theme(context).seekBarMarkerColor,
-                                  borderRadius:
-                                      BorderRadius.circular(markerWidth / 2),
+                              .where(
+                                (marker) => marker > 0.0 && marker < 1.0,
+                              )
+                              .map((marker) {
+                            final markerWidth =
+                                _theme(context).seekBarMarkerWidth;
+                            return Positioned(
+                              left: constraints.maxWidth * marker -
+                                  markerWidth / 2,
+                              top: -2.0,
+                              bottom: -2.0,
+                              child: IgnorePointer(
+                                child: Container(
+                                  width: markerWidth,
+                                  decoration: BoxDecoration(
+                                    color: _theme(context).seekBarMarkerColor,
+                                    borderRadius:
+                                        BorderRadius.circular(markerWidth / 2),
+                                  ),
                                 ),
                               ),
-                            ),
-                          );
-                        }),
+                            );
+                          }),
                           if (_theme(context).seekBarOverlay != null)
                             Positioned.fill(
                               child: IgnorePointer(
                                 child: _theme(context).seekBarOverlay!,
                               ),
                             ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                  Positioned(
-                    left: constraints.maxWidth *
-                        (click ? slider : positionPercent),
-                    child: FractionalTranslation(
-                      translation: const Offset(-0.5, 0.0),
-                      child: AnimatedContainer(
-                        width: hover || click
-                            ? _theme(context).seekBarThumbSize
-                            : 0.0,
-                        height: hover || click
-                            ? _theme(context).seekBarThumbSize
-                            : 0.0,
-                        duration: _theme(context).seekBarThumbTransitionDuration,
-                        decoration: BoxDecoration(
-                          color: _theme(context).seekBarThumbColor,
-                          borderRadius: BorderRadius.circular(
-                            _theme(context).seekBarThumbSize / 2,
+                    if (_theme(context).seekBarSecondaryTrack != null)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        top: _theme(context).seekBarContainerHeight / 2 +
+                            _theme(context).seekBarHoverHeight / 2 +
+                            3.0,
+                        height: 2.0,
+                        child: _theme(context).seekBarSecondaryTrack!,
+                      ),
+                    Positioned(
+                      left: constraints.maxWidth *
+                          (click ? slider : positionPercent),
+                      child: FractionalTranslation(
+                        translation: const Offset(-0.5, 0.0),
+                        child: AnimatedContainer(
+                          width: hover || click
+                              ? _theme(context).seekBarThumbSize
+                              : _theme(context).seekBarThumbAlwaysVisible
+                                  ? _theme(context).seekBarThumbSize * 0.75
+                                  : 0.0,
+                          height: hover || click
+                              ? _theme(context).seekBarThumbSize
+                              : _theme(context).seekBarThumbAlwaysVisible
+                                  ? _theme(context).seekBarThumbSize * 0.75
+                                  : 0.0,
+                          duration:
+                              _theme(context).seekBarThumbTransitionDuration,
+                          decoration: BoxDecoration(
+                            color: _theme(context).seekBarThumbColor,
+                            border: _theme(context).seekBarThumbAlwaysVisible
+                                ? Border.all(
+                                    color: const Color(0x99000000), width: 1)
+                                : null,
+                            boxShadow: _theme(context).seekBarThumbAlwaysVisible
+                                ? const [
+                                    BoxShadow(
+                                        color: Color(0x66000000),
+                                        blurRadius: 4,
+                                        offset: Offset(0, 1))
+                                  ]
+                                : null,
+                            borderRadius: BorderRadius.circular(
+                              _theme(context).seekBarThumbSize / 2,
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
         ),
       ),
-    ),
-  );
-}
+    );
+  }
 
   List<_SeekBarSegment> _resolveSegments(
     List<VideoChapter> rawChapters,
@@ -2090,6 +2137,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
               backgroundColor: _theme(context).seekBarColor,
               hoverColor: _theme(context).seekBarHoverColor,
               bufferColor: _theme(context).seekBarBufferColor,
+              bufferHeight: _theme(context).seekBarBufferHeight,
               positionColor: _theme(context).seekBarPositionColor,
               slider: currentSlider,
               bufferPercent: bufferPercent,
@@ -2111,6 +2159,7 @@ class _SegmentedSeekBarPainter extends CustomPainter {
   final Color backgroundColor;
   final Color hoverColor;
   final Color bufferColor;
+  final double? bufferHeight;
   final Color positionColor;
   final double slider;
   final double bufferPercent;
@@ -2125,6 +2174,7 @@ class _SegmentedSeekBarPainter extends CustomPainter {
     required this.backgroundColor,
     required this.hoverColor,
     required this.bufferColor,
+    this.bufferHeight,
     required this.positionColor,
     required this.slider,
     required this.bufferPercent,
@@ -2145,7 +2195,7 @@ class _SegmentedSeekBarPainter extends CustomPainter {
       final double top = (totalHeight - h) / 2.0;
       final RRect rrect = RRect.fromRectAndRadius(
         Rect.fromLTWH(0, top, totalWidth, h),
-        Radius.zero,
+        Radius.circular(h / 2),
       );
 
       final bgPaint = Paint()..color = backgroundColor;
@@ -2163,8 +2213,9 @@ class _SegmentedSeekBarPainter extends CustomPainter {
       }
       if (bufferPercent > 0) {
         final bufPaint = Paint()..color = bufferColor;
+        final bufferH = (bufferHeight ?? h).clamp(0.0, h).toDouble();
         canvas.drawRect(
-          Rect.fromLTWH(0, top, totalWidth * bufferPercent, h),
+          Rect.fromLTWH(0, top + (h - bufferH) / 2, totalWidth * bufferPercent, bufferH),
           bufPaint,
         );
       }
@@ -2238,8 +2289,9 @@ class _SegmentedSeekBarPainter extends CustomPainter {
         );
       }
       if (bufferFill > 0) {
+        final bufferH = (bufferHeight ?? h).clamp(0.0, h).toDouble();
         canvas.drawRect(
-          Rect.fromLTWH(left, top, width * bufferFill, h),
+          Rect.fromLTWH(left, top + (h - bufferH) / 2, width * bufferFill, bufferH),
           bufPaint,
         );
       }
@@ -2266,6 +2318,7 @@ class _SegmentedSeekBarPainter extends CustomPainter {
         old.backgroundColor != backgroundColor ||
         old.hoverColor != hoverColor ||
         old.bufferColor != bufferColor ||
+        old.bufferHeight != bufferHeight ||
         old.positionColor != positionColor;
   }
 }
