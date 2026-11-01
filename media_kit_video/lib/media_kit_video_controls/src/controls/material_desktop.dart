@@ -380,8 +380,8 @@ class MaterialDesktopVideoControlsThemeData {
   /// Width of independent seek bar markers.
   final double seekBarMarkerWidth;
 
-  /// Optional overlay painted over the seek bar track. The overlay must not
-  /// handle pointer events itself.
+  /// Optional overlay clipped to the seek bar's chapter and hover outline.
+  /// It may fill the available height; pointer events remain on the seek bar.
   final Widget? seekBarOverlay;
 
   /// Read-only secondary track below the timeline. It never covers playback.
@@ -1995,12 +1995,6 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
                               ),
                             );
                           }),
-                          if (_theme(context).seekBarOverlay != null)
-                            Positioned.fill(
-                              child: IgnorePointer(
-                                child: _theme(context).seekBarOverlay!,
-                              ),
-                            ),
                         ],
                       ),
                     ),
@@ -2128,28 +2122,55 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
     return Positioned.fill(
       child: ValueListenableBuilder<double>(
         valueListenable: _sliderNotifier,
-        builder: (context, currentSlider, _) {
+        child: _theme(context).seekBarOverlay,
+        builder: (context, currentSlider, overlay) {
+          final painter = _SegmentedSeekBarPainter(
+            segments: segments,
+            normalHeight: _theme(context).seekBarHeight,
+            hoverHeight: _theme(context).seekBarHoverHeight,
+            backgroundColor: _theme(context).seekBarColor,
+            hoverColor: _theme(context).seekBarHoverColor,
+            bufferColor: _theme(context).seekBarBufferColor,
+            bufferHeight: _theme(context).seekBarBufferHeight,
+            positionColor: _theme(context).seekBarPositionColor,
+            slider: currentSlider,
+            bufferPercent: bufferPercent,
+            positionPercent: positionPercent,
+            isHovered: hover,
+            isClick: click,
+          );
           return CustomPaint(
-            painter: _SegmentedSeekBarPainter(
-              segments: segments,
-              normalHeight: _theme(context).seekBarHeight,
-              hoverHeight: _theme(context).seekBarHoverHeight,
-              backgroundColor: _theme(context).seekBarColor,
-              hoverColor: _theme(context).seekBarHoverColor,
-              bufferColor: _theme(context).seekBarBufferColor,
-              bufferHeight: _theme(context).seekBarBufferHeight,
-              positionColor: _theme(context).seekBarPositionColor,
-              slider: currentSlider,
-              bufferPercent: bufferPercent,
-              positionPercent: positionPercent,
-              isHovered: hover,
-              isClick: click,
-            ),
+            painter: painter,
+            child: overlay == null
+                ? null
+                : ClipPath(
+                    clipper: _SeekBarTrackClipper(painter),
+                    child: IgnorePointer(child: overlay),
+                  ),
           );
         },
       ),
     );
   }
+}
+
+/// Overlays share the primary track's exact chapter gaps and hover outline.
+/// Keeping a single child also avoids duplicating stateful cache observers.
+class _SeekBarTrackClipper extends CustomClipper<Path> {
+  const _SeekBarTrackClipper(this.painter);
+
+  final _SegmentedSeekBarPainter painter;
+
+  @override
+  Path getClip(Size size) => painter.trackPath(size);
+
+  @override
+  bool shouldReclip(_SeekBarTrackClipper old) =>
+      old.painter.segments != painter.segments ||
+      old.painter.slider != painter.slider ||
+      old.painter.isHovered != painter.isHovered ||
+      old.painter.normalHeight != painter.normalHeight ||
+      old.painter.hoverHeight != painter.hoverHeight;
 }
 
 class _SegmentedSeekBarPainter extends CustomPainter {
@@ -2183,20 +2204,54 @@ class _SegmentedSeekBarPainter extends CustomPainter {
     required this.isClick,
   });
 
+  RRect _singleTrackRect(Size size) {
+    final h = isHovered ? hoverHeight : normalHeight;
+    return RRect.fromRectAndRadius(
+      Rect.fromLTWH(0, (size.height - h) / 2, size.width, h),
+      Radius.circular(h / 2),
+    );
+  }
+
+  RRect? _segmentRect(Size size, int index) {
+    const gap = 2.5;
+    final segment = segments[index];
+    final last = index == segments.length - 1;
+    final left = size.width * segment.start + (index == 0 ? 0 : gap / 2);
+    final right = size.width * segment.end - (last ? 0 : gap / 2);
+    final width = (right - left).clamp(0.0, size.width);
+    if (width <= 0 || segment.end <= segment.start) return null;
+    final hovered = isHovered &&
+        slider >= segment.start &&
+        (last ? slider <= segment.end : slider < segment.end);
+    final h = hovered ? hoverHeight : normalHeight;
+    return RRect.fromRectAndRadius(
+      Rect.fromLTWH(left, (size.height - h) / 2, width, h),
+      Radius.circular(hovered ? 2.0 : 1.5),
+    );
+  }
+
+  Path trackPath(Size size) {
+    final path = Path();
+    if (segments.length < 2) {
+      return path..addRRect(_singleTrackRect(size));
+    }
+    for (var i = 0; i < segments.length; i++) {
+      final rect = _segmentRect(size, i);
+      if (rect != null) path.addRRect(rect);
+    }
+    return path;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final double currentPercent = isClick ? slider : positionPercent;
     final double totalWidth = size.width;
-    final double totalHeight = size.height;
 
     // 单轨无分段模式
     if (segments.length < 2) {
-      final double h = isHovered ? hoverHeight : normalHeight;
-      final double top = (totalHeight - h) / 2.0;
-      final RRect rrect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(0, top, totalWidth, h),
-        Radius.circular(h / 2),
-      );
+      final rrect = _singleTrackRect(size);
+      final h = rrect.height;
+      final top = rrect.top;
 
       final bgPaint = Paint()..color = backgroundColor;
       canvas.drawRRect(rrect, bgPaint);
@@ -2231,7 +2286,6 @@ class _SegmentedSeekBarPainter extends CustomPainter {
     }
 
     // 分段胶囊模式：仅当前悬停分段加粗
-    const double gap = 2.5;
     final int count = segments.length;
     final bgPaint = Paint()..color = backgroundColor;
     final hoverPaint = Paint()..color = hoverColor;
@@ -2240,30 +2294,13 @@ class _SegmentedSeekBarPainter extends CustomPainter {
 
     for (int i = 0; i < count; i++) {
       final seg = segments[i];
-      final double rawLeft = totalWidth * seg.start;
-      final double rawRight = totalWidth * seg.end;
-
-      final double left = (i == 0) ? rawLeft : (rawLeft + gap / 2.0);
-      final double right =
-          (i == count - 1) ? rawRight : (rawRight - gap / 2.0);
-      final double width = (right - left).clamp(0.0, totalWidth);
-      if (width <= 0) continue;
-
+      final rrect = _segmentRect(size, i);
+      if (rrect == null) continue;
+      final left = rrect.left;
+      final width = rrect.width;
+      final h = rrect.height;
+      final top = rrect.top;
       final double span = seg.end - seg.start;
-      if (span <= 0) continue;
-
-      final bool isSegmentHovered = isHovered &&
-          slider >= seg.start &&
-          (i == count - 1 ? slider <= seg.end : slider < seg.end);
-
-      final double h = isSegmentHovered ? hoverHeight : normalHeight;
-      final double top = (totalHeight - h) / 2.0;
-      final double radius = isSegmentHovered ? 2.0 : 1.5;
-
-      final RRect rrect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(left, top, width, h),
-        Radius.circular(radius),
-      );
 
       // 1. 底轨
       canvas.drawRRect(rrect, bgPaint);
