@@ -1,7 +1,7 @@
 all: Frameworks/*.xcframework Frameworks/.symlinks
 
-MPV_XCFRAMEWORKS_VERSION=v2.24.5
-MPV_XCFRAMEWORKS_SHA256SUM=2abb51be411281e1662b1e3fb7b73aa160e37bab668d7f797df05d04980b99b2
+MPV_XCFRAMEWORKS_VERSION=v2.24.8
+MPV_XCFRAMEWORKS_SHA256SUM=0aacdc20ff1d77c280c2d59c00d6d87b9b70e7d34d111382995c8bb0f592584d
 
 TAR=tar
 TAR_WILDCARDS_FLAG := $(shell ${TAR} --version 2>&1 | grep -q 'GNU' && echo "--wildcards" || echo "")
