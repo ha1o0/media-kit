@@ -69,8 +69,8 @@ endfunction()
 # Detect architecture and set appropriate libmpv archive
 if(${FLUTTER_TARGET_PLATFORM} STREQUAL "windows-x64")
   set(LIBMPV_ARCH "x86_64")
-  set(LIBMPV "mpv-dev-x86_64-git-cdac4a9.7z")
-  set(LIBMPV_MD5 "d9edd8912cdb4064c3cfbee74325b782")
+  set(LIBMPV "mpv-dev-x86_64-git-562540d.7z")
+  set(LIBMPV_MD5 "b143cc69c436341e45806cdfc7b0079d")
 else()
   set(LIBMPV_ARCH "aarch64")
   set(LIBMPV "mpv-dev-aarch64-20260219-git-d93c669.7z")
@@ -78,7 +78,7 @@ else()
 endif()
 
 # Download URL for the libmpv archive from the latest release.
-set(LIBMPV_URL "https://github.com/bota-official/bota/releases/download/v0.5.8/${LIBMPV}")
+set(LIBMPV_URL "https://github.com/bota-official/bota/releases/download/v0.5.5/${LIBMPV}")
 
 # Local testing override. Drop a matching mpv-dev-<arch>-*.7z into this folder,
 # or pass -DMEDIA_KIT_LIBMPV_LOCAL_ARCHIVE=/path/to/mpv-dev-<arch>-*.7z.
