@@ -291,6 +291,12 @@ class MaterialVideoControlsThemeData {
   /// [Color] of the seek bar thumb.
   final Color seekBarThumbColor;
 
+  /// Whether to segment the timeline using externally supplied chapters.
+  final bool showVideoChapters;
+
+  /// Chapters resolved by the application from the enabled metadata sources.
+  final List<VideoChapter>? videoChapters;
+
   /// Fractional positions to mark independently on the seek bar.
   final List<double> seekBarMarkers;
 
@@ -379,6 +385,8 @@ class MaterialVideoControlsThemeData {
     this.seekBarBufferHeight,
     this.seekBarThumbSize = 12.8,
     this.seekBarThumbColor = const Color(0xFFFF0000),
+    this.showVideoChapters = true,
+    this.videoChapters,
     this.seekBarMarkers = const [],
     this.seekBarMarkerColor = const Color(0xFFFFFFFF),
     this.seekBarMarkerWidth = 2.0,
@@ -439,6 +447,8 @@ class MaterialVideoControlsThemeData {
     double? seekBarBufferHeight,
     double? seekBarThumbSize,
     Color? seekBarThumbColor,
+    bool? showVideoChapters,
+    List<VideoChapter>? videoChapters,
     List<double>? seekBarMarkers,
     Color? seekBarMarkerColor,
     double? seekBarMarkerWidth,
@@ -518,6 +528,8 @@ class MaterialVideoControlsThemeData {
       seekBarBufferHeight: seekBarBufferHeight ?? this.seekBarBufferHeight,
       seekBarThumbSize: seekBarThumbSize ?? this.seekBarThumbSize,
       seekBarThumbColor: seekBarThumbColor ?? this.seekBarThumbColor,
+      showVideoChapters: showVideoChapters ?? this.showVideoChapters,
+      videoChapters: videoChapters ?? this.videoChapters,
       seekBarMarkers: seekBarMarkers ?? this.seekBarMarkers,
       seekBarMarkerColor: seekBarMarkerColor ?? this.seekBarMarkerColor,
       seekBarMarkerWidth: seekBarMarkerWidth ?? this.seekBarMarkerWidth,
@@ -1642,6 +1654,66 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
     super.dispose();
   }
 
+  Widget _buildTrack(double width) {
+    final theme = _theme(context);
+    final chapters = theme.videoChapters ?? const <VideoChapter>[];
+    final bufferHeight = (theme.seekBarBufferHeight ?? theme.seekBarHeight)
+        .clamp(0.0, theme.seekBarHeight).toDouble();
+    return Container(
+      margin: EdgeInsets.only(bottom: theme.seekBarSecondaryTrack == null ? 0 : 6),
+      width: width,
+      height: theme.seekBarHeight,
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.bottomLeft,
+        children: [
+          Positioned.fill(
+            child: ClipPath(
+              clipper: MaterialVideoChapterTrackClipper(chapters: chapters, duration: duration),
+              clipBehavior: theme.showVideoChapters && chapters.isNotEmpty
+                  ? Clip.antiAlias : Clip.none,
+              child: ColoredBox(
+                color: theme.seekBarColor,
+                child: Stack(
+                  alignment: Alignment.bottomLeft,
+                  children: [
+                    Container(
+                      width: width * bufferPercent,
+                      height: bufferHeight,
+                      margin: EdgeInsets.only(bottom: (theme.seekBarHeight - bufferHeight) / 2),
+                      color: theme.seekBarBufferColor,
+                    ),
+                    Container(
+                      width: width * (tapped ? slider : positionPercent),
+                      color: theme.seekBarPositionColor,
+                    ),
+                    if (theme.seekBarOverlay != null)
+                      Positioned.fill(child: IgnorePointer(child: theme.seekBarOverlay!)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          ...theme.seekBarMarkers.where((marker) => marker > 0 && marker < 1).map((marker) {
+            final markerWidth = theme.seekBarMarkerWidth;
+            return Positioned(
+              left: width * marker - markerWidth / 2,
+              top: -2,
+              bottom: -2,
+              child: IgnorePointer(child: Container(
+                width: markerWidth,
+                decoration: BoxDecoration(
+                  color: theme.seekBarMarkerColor,
+                  borderRadius: BorderRadius.circular(markerWidth / 2),
+                ),
+              )),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
   void onPointerMove(PointerMoveEvent e, BoxConstraints constraints) {
     final percent = e.localPosition.dx / constraints.maxWidth;
     setState(() {
@@ -1738,66 +1810,7 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
                   clipBehavior: Clip.none,
                   alignment: Alignment.bottomCenter,
                   children: [
-                    Container(
-                      margin: EdgeInsets.only(
-                        bottom: _theme(context).seekBarSecondaryTrack == null
-                            ? 0
-                            : 6,
-                      ),
-                      width: constraints.maxWidth,
-                      height: _theme(context).seekBarHeight,
-                      alignment: Alignment.bottomLeft,
-                      color: _theme(context).seekBarColor,
-                      child: Stack(
-                        clipBehavior: Clip.none,
-                        alignment: Alignment.bottomLeft,
-                        children: [
-                          Container(
-                            width: constraints.maxWidth * bufferPercent,
-                            height: (_theme(context).seekBarBufferHeight ?? _theme(context).seekBarHeight)
-                                .clamp(0.0, _theme(context).seekBarHeight).toDouble(),
-                            margin: EdgeInsets.only(bottom: (_theme(context).seekBarHeight -
-                                (_theme(context).seekBarBufferHeight ?? _theme(context).seekBarHeight)
-                                    .clamp(0.0, _theme(context).seekBarHeight)) / 2),
-                            color: _theme(context).seekBarBufferColor,
-                          ),
-                          Container(
-                            width: tapped
-                                ? constraints.maxWidth * slider
-                                : constraints.maxWidth * positionPercent,
-                            color: _theme(context).seekBarPositionColor,
-                          ),
-                          ..._theme(context).seekBarMarkers.where(
-                                (marker) => marker > 0.0 && marker < 1.0,
-                              ).map((marker) {
-                            final markerWidth =
-                                _theme(context).seekBarMarkerWidth;
-                            return Positioned(
-                              left: constraints.maxWidth * marker -
-                                  markerWidth / 2,
-                              top: -2.0,
-                              bottom: -2.0,
-                              child: IgnorePointer(
-                                child: Container(
-                                  width: markerWidth,
-                                  decoration: BoxDecoration(
-                                    color: _theme(context).seekBarMarkerColor,
-                                    borderRadius:
-                                        BorderRadius.circular(markerWidth / 2),
-                                  ),
-                                ),
-                              ),
-                            );
-                          }),
-                          if (_theme(context).seekBarOverlay != null)
-                            Positioned.fill(
-                              child: IgnorePointer(
-                                child: _theme(context).seekBarOverlay!,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
+                    _buildTrack(constraints.maxWidth),
                     if (_theme(context).seekBarSecondaryTrack != null)
                       Positioned(
                         left: 0,
@@ -1847,6 +1860,47 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
       ),
     );
   }
+}
+
+// Clip the buffer, position and cache overlay together, leaving independent
+// prefetch markers and the touch target outside the chapter clipping path.
+class MaterialVideoChapterTrackClipper extends CustomClipper<Path> {
+  const MaterialVideoChapterTrackClipper({
+    required this.chapters,
+    required this.duration,
+  });
+
+  final List<VideoChapter> chapters;
+  final Duration duration;
+
+  @override
+  Path getClip(Size size) {
+    final seconds = duration.inMicroseconds / Duration.microsecondsPerSecond;
+    if (seconds <= 0 || size.width <= 0 || chapters.isEmpty) {
+      return Path()..addRect(Offset.zero & size);
+    }
+    final starts = <double>{0, 1,
+      for (final chapter in chapters)
+        if (chapter.time.isFinite && chapter.time > 0 && chapter.time < seconds)
+          chapter.time / seconds,
+    }.toList()..sort();
+    final path = Path();
+    const gap = 2.5;
+    for (var index = 0; index < starts.length - 1; index++) {
+      final left = size.width * starts[index] + (index == 0 ? 0 : gap / 2);
+      final right = size.width * starts[index + 1] -
+          (index == starts.length - 2 ? 0 : gap / 2);
+      if (right <= left) continue;
+      path.addRRect(RRect.fromRectAndRadius(
+        Rect.fromLTRB(left, 0, right, size.height), const Radius.circular(1.5),
+      ));
+    }
+    return path;
+  }
+
+  @override
+  bool shouldReclip(MaterialVideoChapterTrackClipper oldClipper) =>
+      oldClipper.chapters != chapters || oldClipper.duration != duration;
 }
 
 // BUTTON: PLAY/PAUSE
