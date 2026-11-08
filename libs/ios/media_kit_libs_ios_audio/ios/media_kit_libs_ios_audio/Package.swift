@@ -16,18 +16,18 @@ let libmpvTargets = [
     "Swscale"
 ]
 
-let libmpvArtifactBase = "https://github.com/ha1o0/libmpv-darwin-build/releases/download/v2.25.0/libmpv-xcframeworks_v2.25.0_ios-universal-audio-full"
+let libmpvArtifactBase = "https://github.com/ha1o0/libmpv-darwin-build/releases/download/v2.26.1/libmpv-xcframeworks_v2.26.1_ios-universal-audio-full"
 let libmpvChecksums = [
-    "Avcodec": "de406087ede3e31a63e816a8fd4d075847faa6602f119f6a2516b3af6926efb7",
-    "Avfilter": "abdcb32bc84bd78f9ad12414c8099350321502936fd6fba8139e4e7f7894e891",
-    "Avformat": "9e49c1a58715c060c1d84456eabd5512adeb378c117650677f972b1d3b4e4265",
-    "Avutil": "4307ba0f8e069d202813e3533226d26fc49a7e66df74535fda82ce64c9d1c1bc",
-    "Mbedcrypto": "c74644230b80336c10e282079f39772fd21caa0ba09105550fa5e9fde378c85a",
-    "Mbedtls": "96989328e6275a6caec7d191e3f19e077db98c7f17fb87cc334889683b2f0d13",
-    "Mbedx509": "a13f21e6ef6b5b12e96e02a2a05f6f9457972121840c84491c3a9d5da998cfe1",
-    "Mpv": "eebd8f82625c0eb35efc2edaf657e09c7449ba5e8de3e9b478a0eeb6f342f1e9",
-    "Swresample": "918006f93512c367c4c7b6c29faa154d94d8cf5c52bea3fb6f724754a0802faa",
-    "Swscale": "1502d363b377a1283a3e8fbe1f1552e92276db2ee797d1181bd62f6c1ffb29f1"
+    "Avcodec": "0a9d9815b612922488303543874e9a5083c72ed3bd1ded1cc986f866d52a4fbe",
+    "Avfilter": "72c3df8e7b12aace6ce7d20163dbbd8e6f8a352ed5ba7d59e1e00bfeccf9f90c",
+    "Avformat": "744829b337b106b02f107890c04e0d4359f8db476e148cbf0f474b188b11aee0",
+    "Avutil": "d3277b10438e777912082299e0a7b09c3dc976cb27fc8e6bd8189d432115a619",
+    "Mbedcrypto": "7380639efc5bd1e509a89ef9bc72c99f7085245ec22871f8d14828e9a5f2e603",
+    "Mbedtls": "22a6811535f0e4730213b494e8c78a5667bae068b4fa200a6c6c45e228b455cd",
+    "Mbedx509": "afcc4e863731b6dc2bbcc709750f81b54275f97fd4b2be457916449271eb9dc7",
+    "Mpv": "852fa799cc294893631c97ae6b4d9327814341e4b4ad63149a80cf5fc526dd75",
+    "Swresample": "0eca9ff0c51d3d29cad0e7fc91264e07d1fb3ee7e78850146a457551aff9f152",
+    "Swscale": "c272917969faa72bef294dfc3394b042ae118079d7a44a4ad5c8cbd2dab12caa"
 ]
 
 let package = Package(
