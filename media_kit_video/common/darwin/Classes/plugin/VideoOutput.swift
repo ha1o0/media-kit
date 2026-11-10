@@ -199,12 +199,27 @@ public class VideoOutput: NSObject {
       guard !disposed, active != pipRendering else { return }
       pipRendering = active
       restoreHardwareOnForeground = false
+      if VideoOutput.isSimulator || !enableHardwareAcceleration {
+        _updateCallback()
+        return
+      }
+      // Freeing libmpv's render context deselects the active video track. Keep
+      // the same media and position by restoring that track on the new context.
+      let selectedVideo = mpv_get_property_string(handle, "vid")
+      let videoId = selectedVideo.map { String(cString: $0) }
+      if let selectedVideo = selectedVideo { mpv_free(selectedVideo) }
+      var paused: Int32 = 1
+      _ = mpv_get_property(handle, "pause", MPV_FORMAT_FLAG, &paused)
       let previous = textureId
       DispatchQueue.main.sync { self.registry.unregisterTexture(previous) }
       // Release the old render context before creating another for this player.
       texture = nil
       currentSize = .zero
       createTexture(hardware: !active && enableHardwareAcceleration && !VideoOutput.isSimulator)
+      if let videoId = videoId, videoId != "no" {
+        _ = mpv_set_property_string(handle, "vid", videoId)
+      }
+      _ = mpv_set_property(handle, "pause", MPV_FORMAT_FLAG, &paused)
       _updateCallback()
     }
   #endif
