@@ -1,5 +1,8 @@
 import CoreGraphics
 import Foundation
+#if os(iOS)
+  import UIKit
+#endif
 
 #if canImport(Flutter)
   import Flutter
@@ -39,6 +42,12 @@ public class VideoOutput: NSObject {
   private var textureId: Int64 = -1
   private var currentSize: CGSize = CGSize.zero
   private var disposed: Bool = false
+  #if os(iOS)
+    private var pipObserver: NSObjectProtocol?
+    private var foregroundObserver: NSObjectProtocol?
+    private var pipRendering = false
+    private var restoreHardwareOnForeground = false
+  #endif
 
   init(
     handle: Int64,
@@ -59,12 +68,46 @@ public class VideoOutput: NSObject {
 
     super.init()
 
+    #if os(iOS)
+      pipObserver = NotificationCenter.default.addObserver(
+        forName: Notification.Name("bota.mobile-pip-rendering"), object: nil, queue: .main
+      ) { [weak self] event in
+        guard let that = self,
+          event.userInfo?["identity"] as? String == String(Int(bitPattern: that.handle)),
+          let active = event.userInfo?["active"] as? Bool else { return }
+        // OpenGL ES must not be used in the background. Only the opted-in PiP
+        // session switches to mpv's software renderer, at a bounded output size.
+        let foreground = UIApplication.shared.applicationState != .background
+        that.worker.enqueue { [weak that] in
+          guard let that = that, !that.disposed else { return }
+          if !active && !foreground {
+            that.restoreHardwareOnForeground = true
+            return
+          }
+          that.switchPictureInPictureRendering(active)
+        }
+      }
+      foregroundObserver = NotificationCenter.default.addObserver(
+        forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+      ) { [weak self] _ in
+        self?.worker.enqueue { [weak self] in
+          guard let self = self, self.restoreHardwareOnForeground else { return }
+          self.restoreHardwareOnForeground = false
+          self.switchPictureInPictureRendering(false)
+        }
+      }
+    #endif
+
     worker.enqueue {
       self._init()
     }
   }
 
   deinit {
+    #if os(iOS)
+      if let observer = pipObserver { NotificationCenter.default.removeObserver(observer) }
+      if let observer = foregroundObserver { NotificationCenter.default.removeObserver(observer) }
+    #endif
     worker.cancel()
 
     disposed = true
@@ -98,6 +141,11 @@ public class VideoOutput: NSObject {
   private func _init() {
     let enableHardwareAcceleration =
       VideoOutput.isSimulator ? false : enableHardwareAcceleration
+
+    createTexture(hardware: enableHardwareAcceleration)
+  }
+
+  private func createTexture(hardware enableHardwareAcceleration: Bool) {
 
     NSLog(
       "VideoOutput: enableHardwareAcceleration: \(enableHardwareAcceleration)"
@@ -146,6 +194,21 @@ public class VideoOutput: NSObject {
     }
   }
 
+  #if os(iOS)
+    private func switchPictureInPictureRendering(_ active: Bool) {
+      guard !disposed, active != pipRendering else { return }
+      pipRendering = active
+      restoreHardwareOnForeground = false
+      let previous = textureId
+      DispatchQueue.main.sync { self.registry.unregisterTexture(previous) }
+      // Release the old render context before creating another for this player.
+      texture = nil
+      currentSize = .zero
+      createTexture(hardware: !active && enableHardwareAcceleration && !VideoOutput.isSimulator)
+      _updateCallback()
+    }
+  #endif
+
   // Must be run on the main thread
   private func registerTextureId() {
     // Textures must be registered on the platform thread.
@@ -171,7 +234,14 @@ public class VideoOutput: NSObject {
   }
 
   private func _updateCallback() {
-    let size = videoSize
+    var size = videoSize
+    #if os(iOS)
+      if pipRendering && max(size.width, size.height) > 640 {
+        let ratio = 640 / max(size.width, size.height)
+        size = CGSize(width: max(2, (size.width * ratio).rounded(.down)),
+          height: max(2, (size.height * ratio).rounded(.down)))
+      }
+    #endif
 
     if size.width == 0 || size.height == 0 {
       return
@@ -193,6 +263,33 @@ public class VideoOutput: NSObject {
     }
 
     texture.render(size)
+    #if os(iOS)
+      if pipRendering, let pixel = texture.copyPixelBuffer()?.takeRetainedValue() {
+        // The texture pool reuses buffers. Copy before asynchronously enqueueing
+        // to AVKit, which may retain a frame after Flutter consumes the next one.
+        var copy: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, CVPixelBufferGetWidth(pixel),
+          CVPixelBufferGetHeight(pixel), CVPixelBufferGetPixelFormatType(pixel),
+          [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &copy)
+        if status == kCVReturnSuccess, let copy = copy {
+          CVPixelBufferLockBaseAddress(pixel, .readOnly)
+          CVPixelBufferLockBaseAddress(copy, [])
+          if let source = CVPixelBufferGetBaseAddress(pixel), let target = CVPixelBufferGetBaseAddress(copy) {
+            let sourceStride = CVPixelBufferGetBytesPerRow(pixel)
+            let targetStride = CVPixelBufferGetBytesPerRow(copy)
+            for row in 0..<CVPixelBufferGetHeight(pixel) {
+              memcpy(target.advanced(by: row * targetStride), source.advanced(by: row * sourceStride), min(sourceStride, targetStride))
+            }
+          }
+          CVPixelBufferUnlockBaseAddress(copy, [])
+          CVPixelBufferUnlockBaseAddress(pixel, .readOnly)
+          DispatchQueue.main.async {
+            NotificationCenter.default.post(name: Notification.Name("bota.mobile-video-frame"), object: nil,
+              userInfo: ["identity": String(Int(bitPattern: self.handle)), "pixelBuffer": copy])
+          }
+        }
+      }
+    #endif
     DispatchQueue.main.sync { [weak self] in
       guard let that = self else { return }
       // Textures must be marked as available from the main thread
