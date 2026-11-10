@@ -63,6 +63,10 @@ abstract class NativeLibrary {
       'ios': [
         'Mpv.framework/Mpv',
       ],
+      'tvos': [
+        '@rpath/libmpv.2.dylib',
+        'Mpv.framework/Mpv',
+      ],
       'android': [
         'libmpv.so',
       ],
@@ -88,6 +92,8 @@ abstract class NativeLibrary {
                 'Cannot find Mpv.framework/Mpv. Please ensure it\'s presence in the Frameworks folder of the application.',
             'ios':
                 'Cannot find Mpv.framework/Mpv. Please ensure it\'s presence in the Frameworks folder of the application.',
+            'tvos':
+                'Cannot find the tvOS libmpv binary in the application Frameworks folder.',
             'android':
                 'Cannot find libmpv.so. Please ensure it\'s presence in the APK.',
           }[Platform.operatingSystem]!,
