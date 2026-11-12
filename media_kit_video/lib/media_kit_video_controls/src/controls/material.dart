@@ -207,6 +207,11 @@ class MaterialVideoControlsThemeData {
   /// overlays can retain playback history across auto-hide transitions.
   final Widget? centerOverlay;
 
+  /// Replaces only the gesture area underneath the controls. The builder stays
+  /// visible when controls fade and is reused by the fullscreen surface.
+  final Widget Function(BuildContext, VoidCallback, VoidCallback)?
+      gestureBuilder;
+
   /// Custom builder for volume indicator.
   final Widget Function(BuildContext, double)? volumeIndicatorBuilder;
 
@@ -353,6 +358,7 @@ class MaterialVideoControlsThemeData {
     this.controlsTransitionDuration = const Duration(milliseconds: 300),
     this.bufferingIndicatorBuilder,
     this.centerOverlay,
+    this.gestureBuilder,
     this.volumeIndicatorBuilder,
     this.brightnessIndicatorBuilder,
     this.onVolumeChanged,
@@ -429,6 +435,7 @@ class MaterialVideoControlsThemeData {
     Duration? controlsTransitionDuration,
     Widget Function(BuildContext)? bufferingIndicatorBuilder,
     Widget? centerOverlay,
+    Widget Function(BuildContext, VoidCallback, VoidCallback)? gestureBuilder,
     Widget Function(BuildContext, double)? volumeIndicatorBuilder,
     Widget Function(BuildContext, double)? brightnessIndicatorBuilder,
     void Function(double)? onVolumeChanged,
@@ -507,6 +514,7 @@ class MaterialVideoControlsThemeData {
       bufferingIndicatorBuilder:
           bufferingIndicatorBuilder ?? this.bufferingIndicatorBuilder,
       centerOverlay: centerOverlay ?? this.centerOverlay,
+      gestureBuilder: gestureBuilder ?? this.gestureBuilder,
       volumeIndicatorBuilder:
           volumeIndicatorBuilder ?? this.volumeIndicatorBuilder,
       brightnessIndicatorBuilder:
@@ -932,6 +940,21 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
               clipBehavior: Clip.none,
               alignment: Alignment.center,
               children: [
+                if (_theme(context).gestureBuilder != null)
+                  Positioned.fill(
+                    left: 16.0,
+                    top: 16.0,
+                    right: 16.0,
+                    bottom: 16.0 + subtitleVerticalShiftOffset,
+                    child: _theme(context).gestureBuilder!(context, onTap, () {
+                      _timer?.cancel();
+                      setState(() {
+                        visible = false;
+                        mount = false;
+                      });
+                      unshiftSubtitle();
+                    }),
+                  ),
                 // Controls:
                 AnimatedOpacity(
                   curve: Curves.easeInOut,
@@ -949,107 +972,110 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
                     alignment: Alignment.center,
                     children: [
                       Positioned.fill(
-                        child: Container(
-                          color: _theme(context).backdropColor,
+                        child: IgnorePointer(
+                          ignoring: _theme(context).gestureBuilder != null,
+                          child:
+                              Container(color: _theme(context).backdropColor),
                         ),
                       ),
                       // We are adding 16.0 boundary around the actual controls (which contain the vertical drag gesture detectors).
                       // This will make the hit-test on edges (e.g. swiping to: show status-bar, show navigation-bar, go back in navigation) not activate the swipe gesture annoyingly.
-                      Positioned.fill(
-                        left: 16.0,
-                        top: 16.0,
-                        right: 16.0,
-                        bottom: 16.0 + subtitleVerticalShiftOffset,
-                        child: Listener(
-                          onPointerDown: (event) => _handlePointerDown(event),
-                          child: GestureDetector(
-                            onDoubleTapDown: _handleDoubleTapDown,
-                            onLongPress: _theme(context).speedUpOnLongPress
-                                ? _handleLongPress
-                                : null,
-                            onLongPressEnd: _theme(context).speedUpOnLongPress
-                                ? _handleLongPressEnd
-                                : null,
-                            onDoubleTap: () {
-                              if (_tapPosition == null) {
-                                return;
-                              }
-                              if (_isInRightSegment(_tapPosition!.dx)) {
-                                if ((!mount &&
-                                        _theme(context).seekOnDoubleTap) ||
-                                    seekOnDoubleTapEnabledWhileControlsAreVisible) {
-                                  onDoubleTapSeekForward();
+                      if (_theme(context).gestureBuilder == null)
+                        Positioned.fill(
+                          left: 16.0,
+                          top: 16.0,
+                          right: 16.0,
+                          bottom: 16.0 + subtitleVerticalShiftOffset,
+                          child: Listener(
+                            onPointerDown: (event) => _handlePointerDown(event),
+                            child: GestureDetector(
+                              onDoubleTapDown: _handleDoubleTapDown,
+                              onLongPress: _theme(context).speedUpOnLongPress
+                                  ? _handleLongPress
+                                  : null,
+                              onLongPressEnd: _theme(context).speedUpOnLongPress
+                                  ? _handleLongPressEnd
+                                  : null,
+                              onDoubleTap: () {
+                                if (_tapPosition == null) {
+                                  return;
                                 }
-                              } else {
-                                if (_isInLeftSegment(_tapPosition!.dx)) {
+                                if (_isInRightSegment(_tapPosition!.dx)) {
                                   if ((!mount &&
                                           _theme(context).seekOnDoubleTap) ||
                                       seekOnDoubleTapEnabledWhileControlsAreVisible) {
-                                    onDoubleTapSeekBackward();
+                                    onDoubleTapSeekForward();
+                                  }
+                                } else {
+                                  if (_isInLeftSegment(_tapPosition!.dx)) {
+                                    if ((!mount &&
+                                            _theme(context).seekOnDoubleTap) ||
+                                        seekOnDoubleTapEnabledWhileControlsAreVisible) {
+                                      onDoubleTapSeekBackward();
+                                    }
                                   }
                                 }
-                              }
-                            },
-                            onHorizontalDragUpdate: (details) {
-                              if ((!mount && _theme(context).seekGesture) ||
-                                  (_theme(context).seekGesture &&
-                                      _theme(context)
-                                          .gesturesEnabledWhileControlsVisible)) {
-                                onHorizontalDragUpdate(details);
-                              }
-                            },
-                            onHorizontalDragEnd: (details) {
-                              onHorizontalDragEnd();
-                            },
-                            onVerticalDragUpdate: (e) async {
-                              final delta = e.delta.dy;
-                              final Offset position = e.localPosition;
-
-                              if (position.dx <= widgetWidth(context) / 2) {
-                                // Left side of screen swiped
-                                if ((!mount &&
-                                        _theme(context).brightnessGesture &&
-                                        _theme(context).onBrightnessChanged !=
-                                            null) ||
-                                    (_theme(context).brightnessGesture &&
+                              },
+                              onHorizontalDragUpdate: (details) {
+                                if ((!mount && _theme(context).seekGesture) ||
+                                    (_theme(context).seekGesture &&
                                         _theme(context)
-                                            .gesturesEnabledWhileControlsVisible &&
-                                        _theme(context).onBrightnessChanged !=
-                                            null)) {
-                                  final brightness = _brightnessValue -
-                                      delta /
-                                          _theme(context)
-                                              .verticalGestureSensitivity;
-                                  final result = brightness.clamp(0.0, 1.0);
-                                  setBrightness(result);
+                                            .gesturesEnabledWhileControlsVisible)) {
+                                  onHorizontalDragUpdate(details);
                                 }
-                              } else {
-                                // Right side of screen swiped
+                              },
+                              onHorizontalDragEnd: (details) {
+                                onHorizontalDragEnd();
+                              },
+                              onVerticalDragUpdate: (e) async {
+                                final delta = e.delta.dy;
+                                final Offset position = e.localPosition;
 
-                                if ((!mount &&
-                                        _theme(context).volumeGesture &&
-                                        _theme(context).onVolumeChanged !=
-                                            null) ||
-                                    (_theme(context).volumeGesture &&
-                                        _theme(context)
-                                            .gesturesEnabledWhileControlsVisible &&
-                                        _theme(context).onVolumeChanged !=
-                                            null)) {
-                                  final volume = _volumeValue -
-                                      delta /
+                                if (position.dx <= widgetWidth(context) / 2) {
+                                  // Left side of screen swiped
+                                  if ((!mount &&
+                                          _theme(context).brightnessGesture &&
+                                          _theme(context).onBrightnessChanged !=
+                                              null) ||
+                                      (_theme(context).brightnessGesture &&
                                           _theme(context)
-                                              .verticalGestureSensitivity;
-                                  final result = volume.clamp(0.0, 1.0);
-                                  setVolume(result);
+                                              .gesturesEnabledWhileControlsVisible &&
+                                          _theme(context).onBrightnessChanged !=
+                                              null)) {
+                                    final brightness = _brightnessValue -
+                                        delta /
+                                            _theme(context)
+                                                .verticalGestureSensitivity;
+                                    final result = brightness.clamp(0.0, 1.0);
+                                    setBrightness(result);
+                                  }
+                                } else {
+                                  // Right side of screen swiped
+
+                                  if ((!mount &&
+                                          _theme(context).volumeGesture &&
+                                          _theme(context).onVolumeChanged !=
+                                              null) ||
+                                      (_theme(context).volumeGesture &&
+                                          _theme(context)
+                                              .gesturesEnabledWhileControlsVisible &&
+                                          _theme(context).onVolumeChanged !=
+                                              null)) {
+                                    final volume = _volumeValue -
+                                        delta /
+                                            _theme(context)
+                                                .verticalGestureSensitivity;
+                                    final result = volume.clamp(0.0, 1.0);
+                                    setVolume(result);
+                                  }
                                 }
-                              }
-                            },
-                            child: Container(
-                              color: const Color(0x00000000),
+                              },
+                              child: Container(
+                                color: const Color(0x00000000),
+                              ),
                             ),
                           ),
                         ),
-                      ),
                       if (mount)
                         Padding(
                           padding: _theme(context).padding ??

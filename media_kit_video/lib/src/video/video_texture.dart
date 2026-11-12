@@ -331,49 +331,60 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
       _lastNativeWindowVisible = null;
     }
 
-    final currentParams = videoViewParametersNotifier.value;
+    final updatedWidget = widget;
+    VideoViewParameters mergeParameters(VideoViewParameters currentParams) =>
+        currentParams.copyWith(
+          width: updatedWidget.width != oldWidget.width
+              ? updatedWidget.width
+              : currentParams.width,
+          height: updatedWidget.height != oldWidget.height
+              ? updatedWidget.height
+              : currentParams.height,
+          fit: updatedWidget.fit != oldWidget.fit
+              ? updatedWidget.fit
+              : currentParams.fit,
+          fill: updatedWidget.fill != oldWidget.fill
+              ? updatedWidget.fill
+              : currentParams.fill,
+          alignment: updatedWidget.alignment != oldWidget.alignment
+              ? updatedWidget.alignment
+              : currentParams.alignment,
+          aspectRatio: updatedWidget.aspectRatio != oldWidget.aspectRatio
+              ? updatedWidget.aspectRatio
+              : currentParams.aspectRatio,
+          filterQuality: updatedWidget.filterQuality != oldWidget.filterQuality
+              ? updatedWidget.filterQuality
+              : currentParams.filterQuality,
+          visualRotation:
+              updatedWidget.visualRotation != oldWidget.visualRotation
+                  ? updatedWidget.visualRotation
+                  : currentParams.visualRotation,
+          visualMirror: updatedWidget.visualMirror != oldWidget.visualMirror
+              ? updatedWidget.visualMirror
+              : currentParams.visualMirror,
+          controls: updatedWidget.controls != oldWidget.controls
+              ? updatedWidget.controls
+              : currentParams.controls,
+          subtitleViewConfiguration: updatedWidget.subtitleViewConfiguration !=
+                  oldWidget.subtitleViewConfiguration
+              ? updatedWidget.subtitleViewConfiguration
+              : currentParams.subtitleViewConfiguration,
+          focusNode: updatedWidget.focusNode != oldWidget.focusNode
+              ? updatedWidget.focusNode
+              : currentParams.focusNode,
+        );
 
-    final newParams = currentParams.copyWith(
-      width:
-          widget.width != oldWidget.width ? widget.width : currentParams.width,
-      height: widget.height != oldWidget.height
-          ? widget.height
-          : currentParams.height,
-      fit: widget.fit != oldWidget.fit ? widget.fit : currentParams.fit,
-      fill: widget.fill != oldWidget.fill ? widget.fill : currentParams.fill,
-      alignment: widget.alignment != oldWidget.alignment
-          ? widget.alignment
-          : currentParams.alignment,
-      aspectRatio: widget.aspectRatio != oldWidget.aspectRatio
-          ? widget.aspectRatio
-          : currentParams.aspectRatio,
-      filterQuality: widget.filterQuality != oldWidget.filterQuality
-          ? widget.filterQuality
-          : currentParams.filterQuality,
-      visualRotation: widget.visualRotation != oldWidget.visualRotation
-          ? widget.visualRotation
-          : currentParams.visualRotation,
-      visualMirror: widget.visualMirror != oldWidget.visualMirror
-          ? widget.visualMirror
-          : currentParams.visualMirror,
-      controls: widget.controls != oldWidget.controls
-          ? widget.controls
-          : currentParams.controls,
-      subtitleViewConfiguration: widget.subtitleViewConfiguration !=
-              oldWidget.subtitleViewConfiguration
-          ? widget.subtitleViewConfiguration
-          : currentParams.subtitleViewConfiguration,
-      focusNode: widget.focusNode != oldWidget.focusNode
-          ? widget.focusNode
-          : currentParams.focusNode,
-    );
-
-    if (newParams != currentParams) {
+    if (mergeParameters(videoViewParametersNotifier.value) !=
+        videoViewParametersNotifier.value) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || (_disposeNotifiers && _contextNotifier.disposed)) {
           return;
         }
-        videoViewParametersNotifier.value = newParams;
+        // Windowed and fullscreen Video widgets share this notifier. Merge
+        // only changed fields into its latest value so a controls update cannot
+        // overwrite a fit/rotation update queued by the other surface.
+        videoViewParametersNotifier.value =
+            mergeParameters(videoViewParametersNotifier.value);
       });
     }
   }
