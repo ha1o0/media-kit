@@ -267,6 +267,9 @@ class MaterialVideoControlsThemeData {
   /// Margin around the seek bar.
   final EdgeInsets seekBarMargin;
 
+  /// Show the current seek position and duration beside the track.
+  final bool showSeekBarTimeLabels;
+
   /// Height of the seek bar.
   final double seekBarHeight;
 
@@ -312,6 +315,9 @@ class MaterialVideoControlsThemeData {
 
   /// Read-only secondary track below the timeline. It never covers playback.
   final Widget? seekBarSecondaryTrack;
+
+  /// Optional non-interactive visualization above the track.
+  final Widget? seekBarHeatmap;
 
   /// [Alignment] of seek bar inside the seek bar container.
   final Alignment seekBarAlignment;
@@ -377,6 +383,7 @@ class MaterialVideoControlsThemeData {
     this.buttonBarButtonSize = 24.0,
     this.buttonBarButtonColor = const Color(0xFFFFFFFF),
     this.seekBarMargin = EdgeInsets.zero,
+    this.showSeekBarTimeLabels = false,
     this.seekBarHeight = 2.4,
     this.seekBarContainerHeight = 36.0,
     this.seekBarColor = const Color(0x3DFFFFFF),
@@ -392,6 +399,7 @@ class MaterialVideoControlsThemeData {
     this.seekBarMarkerWidth = 2.0,
     this.seekBarOverlay,
     this.seekBarSecondaryTrack,
+    this.seekBarHeatmap,
     this.seekBarAlignment = Alignment.bottomCenter,
     this.shiftSubtitlesOnControlsVisibilityChange = false,
   });
@@ -439,6 +447,7 @@ class MaterialVideoControlsThemeData {
     double? buttonBarButtonSize,
     Color? buttonBarButtonColor,
     EdgeInsets? seekBarMargin,
+    bool? showSeekBarTimeLabels,
     double? seekBarHeight,
     double? seekBarContainerHeight,
     Color? seekBarColor,
@@ -454,6 +463,7 @@ class MaterialVideoControlsThemeData {
     double? seekBarMarkerWidth,
     Widget? seekBarOverlay,
     Widget? seekBarSecondaryTrack,
+    Widget? seekBarHeatmap,
     Alignment? seekBarAlignment,
     bool? shiftSubtitlesOnControlsVisibilityChange,
   }) {
@@ -519,6 +529,7 @@ class MaterialVideoControlsThemeData {
       buttonBarButtonSize: buttonBarButtonSize ?? this.buttonBarButtonSize,
       buttonBarButtonColor: buttonBarButtonColor ?? this.buttonBarButtonColor,
       seekBarMargin: seekBarMargin ?? this.seekBarMargin,
+      showSeekBarTimeLabels: showSeekBarTimeLabels ?? this.showSeekBarTimeLabels,
       seekBarHeight: seekBarHeight ?? this.seekBarHeight,
       seekBarContainerHeight:
           seekBarContainerHeight ?? this.seekBarContainerHeight,
@@ -534,6 +545,7 @@ class MaterialVideoControlsThemeData {
       seekBarMarkerColor: seekBarMarkerColor ?? this.seekBarMarkerColor,
       seekBarMarkerWidth: seekBarMarkerWidth ?? this.seekBarMarkerWidth,
       seekBarOverlay: seekBarOverlay ?? this.seekBarOverlay,
+      seekBarHeatmap: seekBarHeatmap ?? this.seekBarHeatmap,
       seekBarSecondaryTrack:
           seekBarSecondaryTrack ?? this.seekBarSecondaryTrack,
       seekBarAlignment: seekBarAlignment ?? this.seekBarAlignment,
@@ -1667,6 +1679,9 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
         clipBehavior: Clip.none,
         alignment: Alignment.bottomLeft,
         children: [
+          if (theme.seekBarHeatmap != null)
+            Positioned(left: 0, right: 0, bottom: theme.seekBarHeight, height: 24,
+              child: IgnorePointer(child: theme.seekBarHeatmap!)),
           Positioned.fill(
             child: ClipPath(
               clipper: MaterialVideoChapterTrackClipper(chapters: chapters, duration: duration),
@@ -1786,10 +1801,7 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      clipBehavior: Clip.none,
-      margin: _theme(context).seekBarMargin,
-      child: LayoutBuilder(
+    final track = LayoutBuilder(
         builder: (context, constraints) => MouseRegion(
           cursor: SystemMouseCursors.click,
           child: GestureDetector(
@@ -1857,7 +1869,29 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
             ),
           ),
         ),
-      ),
+    );
+    String time(Duration value) {
+      final total = value.inSeconds.clamp(0, 359999);
+      final minutes = (total ~/ 60 % 60).toString().padLeft(2, '0');
+      final seconds = (total % 60).toString().padLeft(2, '0');
+      return total >= 3600 ? '${total ~/ 3600}:$minutes:$seconds' : '$minutes:$seconds';
+    }
+    Widget label(String value, String id) => Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      child: Text(value, key: ValueKey(id),
+        style: const TextStyle(fontSize: 11, color: Colors.white),
+        textScaler: MediaQuery.textScalerOf(context).clamp(maxScaleFactor: 1.3)),
+    );
+    return Container(
+      clipBehavior: Clip.none,
+      margin: _theme(context).seekBarMargin,
+      child: _theme(context).showSeekBarTimeLabels
+          ? Row(children: [
+              label(time(tapped ? duration * slider : position), 'player-elapsed-time'),
+              Expanded(child: track),
+              label(time(duration), 'player-total-time'),
+            ])
+          : track,
     );
   }
 }
