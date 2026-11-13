@@ -148,7 +148,8 @@ class AndroidVideoController extends PlatformVideoController {
 
     // Update [configuration] to have default values.
     configuration = configuration.copyWith(
-      vo: configuration.vo ?? 'gpu',
+      vo: configuration.vo ??
+          (configuration.renderBackend == 'gpu-next' ? 'gpu-next' : 'gpu'),
       hwdec: configuration.hwdec ?? await getDefaultHwdec(),
     );
 
