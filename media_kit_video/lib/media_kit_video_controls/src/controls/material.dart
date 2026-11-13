@@ -1903,7 +1903,7 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
       return total >= 3600 ? '${total ~/ 3600}:$minutes:$seconds' : '$minutes:$seconds';
     }
     Widget label(String value, String id) => Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
       child: Text(value, key: ValueKey(id),
         style: const TextStyle(fontSize: 11, color: Colors.white),
         textScaler: MediaQuery.textScalerOf(context).clamp(maxScaleFactor: 1.3)),
