@@ -163,6 +163,9 @@ class Video extends StatefulWidget {
 class VideoState extends State<Video> with WidgetsBindingObserver {
   late final _contextNotifier = DisposeSafeNotifier<BuildContext?>(null);
   late ValueNotifier<VideoViewParameters> videoViewParametersNotifier;
+  // Keep the embedded notifier alive when route visibility / MediaQuery changes.
+  // Fullscreen borrows it; replacing it would disconnect the two video planes.
+  ValueNotifier<VideoViewParameters>? _ownedVideoViewParametersNotifier;
   late bool _disposeNotifiers;
   final _subtitleViewKey = GlobalKey<SubtitleViewState>();
   final _nativeWindowViewportKey = GlobalKey();
@@ -262,7 +265,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
         media_kit_video_controls.VideoStateInheritedWidget.maybeOf(
               context,
             )?.videoViewParametersNotifier ??
-            ValueNotifier<VideoViewParameters>(
+            (_ownedVideoViewParametersNotifier ??=
+                ValueNotifier<VideoViewParameters>(
               VideoViewParameters(
                 width: widget.width,
                 height: widget.height,
@@ -277,7 +281,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                 subtitleViewConfiguration: widget.subtitleViewConfiguration,
                 focusNode: widget.focusNode,
               ),
-            );
+            ));
     _disposeNotifiers =
         media_kit_video_controls.VideoStateInheritedWidget.maybeOf(
               context,
