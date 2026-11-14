@@ -59,6 +59,16 @@ class AndroidVideoController extends PlatformVideoController {
       // Missing track metadata keeps the user's configured output.
     }
     _fileVideoOutput = androidVideoOutputForTracks(configuration.vo!, decoded);
+    final currentDecoder =
+        await platform.getProperty('hwdec', waitForInitialization: false);
+    final decoder = androidHardwareDecoderForTracks(
+      currentDecoder,
+      configuration.vo!,
+      decoded,
+    );
+    if (decoder != currentDecoder) {
+      await setProperty('file-local-options/hwdec', decoder);
+    }
     if ((wid.value ?? 0) != 0) {
       await setProperty('file-local-options/vo', _fileVideoOutput!);
     }
