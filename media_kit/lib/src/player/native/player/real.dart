@@ -1634,8 +1634,10 @@ class NativePlayer extends PlatformPlayer {
     if (event.ref.event_id == generated.mpv_event_id.MPV_EVENT_END_FILE &&
         event.ref.data != nullptr) {
       final ended = event.ref.data.cast<generated.mpv_event_end_file>().ref;
-      if (ended.reason == generated.mpv_end_file_reason.MPV_END_FILE_REASON_ERROR) {
-        final message = mpv.mpv_error_string(ended.error).cast<Utf8>().toDartString();
+      if (ended.reason ==
+          generated.mpv_end_file_reason.MPV_END_FILE_REASON_ERROR) {
+        final message =
+            mpv.mpv_error_string(ended.error).cast<Utf8>().toDartString();
         // This event belongs to the main media, never to a failed sub-add.
         _subtitleErrorRouter.playbackFailed('Failed to open media ($message)');
       }
@@ -2358,6 +2360,18 @@ class NativePlayer extends PlatformPlayer {
           prop.ref.id,
         );
       }
+      if (prop.ref.name.cast<Utf8>().toDartString() == 'on_loaded') {
+        try {
+          for (final hook in onBeforeDecodeHooks) {
+            await hook.call();
+          }
+        } catch (exception, stacktrace) {
+          print(exception);
+          print(stacktrace);
+        } finally {
+          mpv.mpv_hook_continue(ctx, prop.ref.id);
+        }
+      }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'on_unload') {
         // --------------------------------------------------
         for (final hook in onUnloadHooks) {
@@ -2635,6 +2649,11 @@ class NativePlayer extends PlatformPlayer {
       mpv.mpv_hook_add(ctx, 0, unload.cast(), 0);
       calloc.free(load);
       calloc.free(unload);
+      if (Platform.isAndroid) {
+        final loaded = 'on_loaded'.toNativeUtf8();
+        mpv.mpv_hook_add(ctx, 0, loaded.cast(), 0);
+        calloc.free(loaded);
+      }
 
       await NativeReferenceHolder.instance.add(ctx);
     });
@@ -2886,6 +2905,9 @@ class NativePlayer extends PlatformPlayer {
 
   /// The methods which must execute synchronously before playback of a source can begin.
   final List<Future<void> Function()> onLoadHooks = [];
+
+  /// Android output policy after track selection, before decoders begin.
+  final List<Future<void> Function()> onBeforeDecodeHooks = [];
 
   /// The methods which must execute synchronously before playback of a source can end.
   final List<Future<void> Function()> onUnloadHooks = [];

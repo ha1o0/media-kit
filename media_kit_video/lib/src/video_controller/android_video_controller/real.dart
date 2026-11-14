@@ -5,6 +5,8 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'dart:io';
 import 'dart:async';
+import 'dart:convert';
+import 'package:media_kit_video/src/utils/android_video_output.dart';
 import 'dart:collection';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
@@ -45,6 +47,27 @@ class AndroidVideoController extends PlatformVideoController {
     }
   }
 
+  String? _fileVideoOutput;
+
+  Future<void> _onBeforeDecode() async {
+    final tracks =
+        await platform.getProperty('track-list', waitForInitialization: false);
+    Object? decoded;
+    try {
+      decoded = jsonDecode(tracks);
+    } on FormatException {
+      // Missing track metadata keeps the user's configured output.
+    }
+    _fileVideoOutput = androidVideoOutputForTracks(configuration.vo!, decoded);
+    if ((wid.value ?? 0) != 0) {
+      await setProperty('file-local-options/vo', _fileVideoOutput!);
+    }
+  }
+
+  Future<void> _onUnload() async {
+    _fileVideoOutput = null;
+  }
+
   /// Listener for updating the --wid property.
   Future<void> widListener() {
     return lock.synchronized(() async {
@@ -53,7 +76,8 @@ class AndroidVideoController extends PlatformVideoController {
       final androidSurfaceSizeValue = [width, height].join('x');
       final widValue = wid.value?.toString() ?? '0';
       // When --wid is 0, vo=null is required to avoid SIGSEGV.
-      final voValue = widValue == '0' ? 'null' : configuration.vo!;
+      final voValue =
+          widValue == '0' ? 'null' : (_fileVideoOutput ?? configuration.vo!);
       final vidValue = widValue == '0' ? 'no' : 'auto';
       // It is important to re-initialize --vo after --android-surface-size.
       await setProperty('vo', 'null');
@@ -84,6 +108,8 @@ class AndroidVideoController extends PlatformVideoController {
     super.configuration,
   ) {
     wid.addListener(widListener);
+    platform.onBeforeDecodeHooks.add(_onBeforeDecode);
+    platform.onUnloadHooks.add(_onUnload);
     videoParamsSubscription = player.stream.videoParams.listen(
       (event) => lock.synchronized(() async {
         final int width;
@@ -231,8 +257,10 @@ class AndroidVideoController extends PlatformVideoController {
   /// Disposes the instance. Releases allocated resources back to the system.
   Future<void> _dispose() async {
     super.dispose();
-    wid.dispose();
+    platform.onBeforeDecodeHooks.remove(_onBeforeDecode);
+    platform.onUnloadHooks.remove(_onUnload);
     wid.removeListener(widListener);
+    wid.dispose();
     await videoParamsSubscription?.cancel();
     final handle = await player.handle;
     _controllers.remove(handle);
