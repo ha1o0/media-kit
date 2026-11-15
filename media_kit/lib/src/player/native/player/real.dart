@@ -30,6 +30,7 @@ import 'package:media_kit/src/models/video_params.dart';
 import 'package:media_kit/src/player/native/core/fallback_bitrate_handler.dart';
 import 'package:media_kit/src/player/native/core/initializer.dart';
 import 'package:media_kit/src/player/native/core/native_library.dart';
+import 'package:media_kit/src/player/native/player/screenshot_image.dart';
 import 'package:media_kit/src/player/native/utils/android_asset_loader.dart';
 import 'package:media_kit/src/player/native/utils/android_helper.dart';
 import 'package:media_kit/src/player/native/utils/isolates.dart';
@@ -1190,7 +1191,8 @@ class NativePlayer extends PlatformPlayer {
   Future<Uint8List?> screenshot(
       {String? format = 'image/jpeg',
       bool synchronized = true,
-      bool includeLibassSubtitles = false}) async {
+      bool includeLibassSubtitles = false,
+      int? maxDimension}) async {
     Future<Uint8List?> function() async {
       if (![
         'image/jpeg',
@@ -1207,6 +1209,10 @@ class NativePlayer extends PlatformPlayer {
         throw AssertionError('[Player] has been disposed');
       }
 
+      if (maxDimension != null && maxDimension <= 0) {
+        throw ArgumentError.value(maxDimension, 'maxDimension');
+      }
+
       await waitForPlayerInitialization;
       await waitForVideoControllerInitializationIfAttached;
 
@@ -1217,6 +1223,7 @@ class NativePlayer extends PlatformPlayer {
           NativeLibrary.path,
           format,
           includeLibassSubtitles,
+          maxDimension,
         ),
       );
     }
@@ -2931,12 +2938,14 @@ class _ScreenshotData {
   final String lib;
   final String? format;
   final bool includeLibassSubtitles;
+  final int? maxDimension;
 
   const _ScreenshotData(
     this.ctx,
     this.lib,
     this.format,
     this.includeLibassSubtitles,
+    this.maxDimension,
   );
 }
 
@@ -2965,101 +2974,90 @@ Uint8List? _screenshot(_ScreenshotData data) {
   for (int i = 0; i < args.length; i++) {
     arr[i] = pointers[i];
   }
-  mpv.mpv_command_ret(
-    ctx,
-    arr.cast(),
-    result.cast(),
-  );
+  try {
+    mpv.mpv_command_ret(
+      ctx,
+      arr.cast(),
+      result.cast(),
+    );
 
-  Uint8List? image;
+    Uint8List? image;
 
-  if (result.ref.format == generated.mpv_format.MPV_FORMAT_NODE_MAP) {
-    int? w, h, stride;
-    Uint8List? bytes;
+    if (result.ref.format == generated.mpv_format.MPV_FORMAT_NODE_MAP) {
+      int? w, h, stride;
+      Uint8List? bytes;
 
-    final map = result.ref.u.list;
-    for (int i = 0; i < map.ref.num; i++) {
-      final key = map.ref.keys[i].cast<Utf8>().toDartString();
-      final value = map.ref.values[i];
-      switch (value.format) {
-        case generated.mpv_format.MPV_FORMAT_INT64:
-          switch (key) {
-            case 'w':
-              w = value.u.int64;
+      final map = result.ref.u.list;
+      for (int i = 0; i < map.ref.num; i++) {
+        final key = map.ref.keys[i].cast<Utf8>().toDartString();
+        final value = map.ref.values[i];
+        switch (value.format) {
+          case generated.mpv_format.MPV_FORMAT_INT64:
+            switch (key) {
+              case 'w':
+                w = value.u.int64;
+                break;
+              case 'h':
+                h = value.u.int64;
+                break;
+              case 'stride':
+                stride = value.u.int64;
+                break;
+            }
+            break;
+          case generated.mpv_format.MPV_FORMAT_BYTE_ARRAY:
+            switch (key) {
+              case 'data':
+                final data = value.u.ba.ref.data.cast<Uint8>();
+                bytes = data.asTypedList(value.u.ba.ref.size);
+                break;
+            }
+            break;
+        }
+      }
+
+      if (w != null && h != null && stride != null && bytes != null) {
+        switch (format) {
+          case 'image/jpeg':
+            {
+              final pixels = nativeScreenshotImage(
+                bytes: bytes,
+                width: w,
+                height: h,
+                stride: stride,
+                maxDimension: data.maxDimension,
+              );
+              image = encodeJpg(pixels);
               break;
-            case 'h':
-              h = value.u.int64;
+            }
+          case 'image/png':
+            {
+              final pixels = nativeScreenshotImage(
+                bytes: bytes,
+                width: w,
+                height: h,
+                stride: stride,
+                maxDimension: data.maxDimension,
+              );
+              image = encodePng(pixels);
               break;
-            case 'stride':
-              stride = value.u.int64;
+            }
+          case null:
+            {
+              image = bytes.sublist(0);
               break;
-          }
-          break;
-        case generated.mpv_format.MPV_FORMAT_BYTE_ARRAY:
-          switch (key) {
-            case 'data':
-              final data = value.u.ba.ref.data.cast<Uint8>();
-              bytes = data.asTypedList(value.u.ba.ref.size);
-              break;
-          }
-          break;
+            }
+        }
       }
     }
 
-    if (w != null && h != null && stride != null && bytes != null) {
-      switch (format) {
-        case 'image/jpeg':
-          {
-            final pixels = Image(
-              width: w,
-              height: h,
-              numChannels: 3,
-            );
-            for (final pixel in pixels) {
-              final x = pixel.x;
-              final y = pixel.y;
-              final i = (y * stride) + (x * 4);
-              pixel.b = bytes[i];
-              pixel.g = bytes[i + 1];
-              pixel.r = bytes[i + 2];
-            }
-            image = encodeJpg(pixels);
-            break;
-          }
-        case 'image/png':
-          {
-            final pixels = Image(
-              width: w,
-              height: h,
-              numChannels: 3,
-            );
-            for (final pixel in pixels) {
-              final x = pixel.x;
-              final y = pixel.y;
-              final i = (y * stride) + (x * 4);
-              pixel.b = bytes[i];
-              pixel.g = bytes[i + 1];
-              pixel.r = bytes[i + 2];
-            }
-            image = encodePng(pixels);
-            break;
-          }
-        case null:
-          {
-            image = bytes.sublist(0);
-            break;
-          }
-      }
-    }
+    return image;
+  } finally {
+    pointers.forEach(calloc.free);
+    mpv.mpv_free_node_contents(result.cast());
+    calloc.free(arr);
+    calloc.free(result.cast());
   }
-
-  pointers.forEach(calloc.free);
-  mpv.mpv_free_node_contents(result.cast());
-
-  calloc.free(arr);
-  calloc.free(result.cast());
-
-  return image;
 }
 
 class _GetPlaylistData {

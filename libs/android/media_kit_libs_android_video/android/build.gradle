@@ -48,6 +48,25 @@ android {
 }
 
 task downloadDependencies(type: Exec) {   
+        // Local codec iterations can use a separately verified ARM64 bundle.
+        // Keep release downloads and the other ABIs at their pinned defaults.
+        def localArm64Path = System.getenv("BOTA_ANDROID_LIBMPV_ARM64_JAR")
+        def localArm64SHA256 = System.getenv("BOTA_ANDROID_LIBMPV_ARM64_SHA256")
+        def localArm64File = null
+        if (localArm64Path || localArm64SHA256) {
+            if (!localArm64Path || !localArm64SHA256 || !(localArm64SHA256 ==~ /[a-fA-F0-9]{64}/)) {
+                throw new GradleException("A local ARM64 libmpv JAR requires its SHA-256 checksum")
+            }
+            localArm64File = file(localArm64Path)
+            if (!localArm64File.isFile()) {
+                throw new GradleException("Local ARM64 libmpv JAR does not exist: ${localArm64File}")
+            }
+            def digest = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(localArm64File.toPath())).encodeHex().toString()
+            if (digest != localArm64SHA256.toLowerCase()) {
+                // Never delete a caller's local artifact on failed validation.
+                throw new GradleException("SHA-256 verification failed for local ARM64 libmpv JAR")
+            }
+        }
         // Delete previously created /output subdirectory.
 
         def outputDir = file("$buildDir/output")
@@ -65,8 +84,9 @@ task downloadDependencies(type: Exec) {
         ]
 
         filesToDownload.each { fileInfo ->
-            def destFile = fileInfo.destination
-            if (destFile.exists()) {
+            def useLocal = localArm64File != null && fileInfo.destination.name == "default-arm64-v8a.jar"
+            def destFile = useLocal ? localArm64File : fileInfo.destination
+            if (!useLocal && destFile.exists()) {
                 def calculatedSHA256 = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(destFile.toPath())).encodeHex().toString()
 
                 if (calculatedSHA256 != fileInfo.sha256) {
@@ -76,7 +96,7 @@ task downloadDependencies(type: Exec) {
 
             }
 
-            if (!destFile.exists()) {
+            if (!useLocal && !destFile.exists()) {
                 destFile.parentFile.mkdirs()
                 println "Downloading file from: ${fileInfo.url}"
                 destFile.withOutputStream { os ->
