@@ -59,6 +59,7 @@ public class VideoOutput: NSObject {
   private var disposed: Bool = false
   #if os(iOS)
     private var releasePictureInPictureRenderContext: (() -> Void)?
+    private var hasUsedIosSurface = false
     private var pipObserver: NSObjectProtocol?
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var pipPolicy = PictureInPictureRenderPolicy()
@@ -167,35 +168,40 @@ public class VideoOutput: NSObject {
   }
 
   private func _init() {
-    let enableHardwareAcceleration =
-      VideoOutput.isSimulator ? false : enableHardwareAcceleration
-
     createTexture(hardware: enableHardwareAcceleration)
   }
 
-  private func createTexture(hardware enableHardwareAcceleration: Bool) {
+  private func createTexture(hardware requestedHardwareAcceleration: Bool) {
+    // A request for the new backend may still be paired with the old locked
+    // libmpv. Fall back without requiring a different app or player session.
+    #if os(iOS)
+      if requestedHardwareAcceleration, renderBackend == "iosurface",
+        let metal = TextureIOSurface(handle: handle, updateCallback: { [weak self] in
+          self?.updateCallback()
+        }) {
+        NSLog("VideoOutput: using gpu-next / Vulkan / MoltenVK IOSurface")
+        hasUsedIosSurface = true
+        releasePictureInPictureRenderContext = { [weak metal] in metal?.releaseRenderContext() }
+        texture = SafeResizableTexture(metal)
+        registerTextureOnMainThread()
+        return
+      }
+      let legacyBackend = renderBackend == "iosurface" ? nil : renderBackend
+    #else
+      let legacyBackend = renderBackend
+    #endif
+    let enableHardwareAcceleration = requestedHardwareAcceleration && !VideoOutput.isSimulator
 
-    NSLog(
-      "VideoOutput: enableHardwareAcceleration: \(enableHardwareAcceleration)"
-    )
-
+    NSLog("VideoOutput: enableHardwareAcceleration: \(enableHardwareAcceleration)")
     if VideoOutput.isSimulator {
-      NSLog(
-        "VideoOutput: warning: hardware rendering is disabled in the iOS simulator, due to an incompatibility with OpenGL ES"
-      )
+      NSLog("VideoOutput: using software rendering on the iOS simulator")
     }
 
     if enableHardwareAcceleration {
       let hardware = TextureHW(
         handle: handle,
-        renderBackend: renderBackend,
-        // Use `weak self` to prevent memory leaks
-        updateCallback: { [weak self]() in
-          guard let that = self else {
-            return
-          }
-          that.updateCallback()
-        }
+        renderBackend: legacyBackend,
+        updateCallback: { [weak self] in self?.updateCallback() }
       )
       #if os(iOS)
         releasePictureInPictureRenderContext = { [weak hardware] in hardware?.releaseRenderContext() }
@@ -204,26 +210,18 @@ public class VideoOutput: NSObject {
     } else {
       let software = TextureSW(
         handle: handle,
-        // Use `weak self` to prevent memory leaks
-        updateCallback: { [weak self]() in
-          guard let that = self else {
-            return
-          }
-          that.updateCallback()
-        }
+        updateCallback: { [weak self] in self?.updateCallback() }
       )
       #if os(iOS)
         releasePictureInPictureRenderContext = { [weak software] in software?.releaseRenderContext() }
       #endif
       texture = SafeResizableTexture(software)
     }
+    registerTextureOnMainThread()
+  }
 
-    DispatchQueue.main.sync { [weak self]() in
-      guard let that = self else {
-        return
-      }
-      that.registerTextureId()
-    }
+  private func registerTextureOnMainThread() {
+    DispatchQueue.main.sync { [weak self] in self?.registerTextureId() }
   }
 
   #if os(iOS)
@@ -231,7 +229,7 @@ public class VideoOutput: NSObject {
       let active = pipPolicy.usesSoftware(currentlySoftware: pipRendering)
       guard !disposed, active != pipRendering else { return }
       pipRendering = active
-      if VideoOutput.isSimulator || !enableHardwareAcceleration {
+      if !enableHardwareAcceleration || (VideoOutput.isSimulator && !hasUsedIosSurface) {
         _updateCallback()
         return
       }
@@ -250,7 +248,7 @@ public class VideoOutput: NSObject {
       releasePictureInPictureRenderContext?()
       texture = nil
       currentSize = .zero
-      createTexture(hardware: !active && enableHardwareAcceleration && !VideoOutput.isSimulator)
+      createTexture(hardware: !active && enableHardwareAcceleration)
       if let videoId = videoId, videoId != "no" {
         _ = mpv_set_property_string(handle, "vid", videoId)
       }
