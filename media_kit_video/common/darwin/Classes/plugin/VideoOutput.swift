@@ -46,6 +46,8 @@ public class VideoOutput: NSObject {
     private var pipObserver: NSObjectProtocol?
     private var foregroundObserver: NSObjectProtocol?
     private var pipRendering = false
+    private var pipFrameDelivery = false
+    private var lastPipPreviewFrame = 0.0
     private var restoreHardwareOnForeground = false
   #endif
 
@@ -78,8 +80,10 @@ public class VideoOutput: NSObject {
         // OpenGL ES must not be used in the background. Only the opted-in PiP
         // session switches to mpv's software renderer, at a bounded output size.
         let foreground = UIApplication.shared.applicationState != .background
+        let frames = event.userInfo?["frames"] as? Bool ?? active
         that.worker.enqueue { [weak that] in
           guard let that = that, !that.disposed else { return }
+          that.pipFrameDelivery = frames
           if !active && !foreground {
             that.restoreHardwareOnForeground = true
             return
@@ -279,7 +283,13 @@ public class VideoOutput: NSObject {
 
     texture.render(size)
     #if os(iOS)
-      if pipRendering, let pixel = texture.copyPixelBuffer()?.takeRetainedValue() {
+      // Prime AVKit for automatic PiP without replacing the foreground renderer
+      // or reducing its resolution. A preview twice per second is sufficient;
+      // active PiP continues to receive every frame from the bounded renderer.
+      let previewTime = CFAbsoluteTimeGetCurrent()
+      if pipFrameDelivery && (pipRendering || previewTime - lastPipPreviewFrame >= 0.5),
+        let pixel = texture.copyPixelBuffer()?.takeRetainedValue() {
+        lastPipPreviewFrame = previewTime
         // The texture pool reuses buffers. Copy before asynchronously enqueueing
         // to AVKit, which may retain a frame after Flutter consumes the next one.
         var copy: CVPixelBuffer?
