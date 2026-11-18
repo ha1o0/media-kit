@@ -5,6 +5,7 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'dart:io';
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
@@ -127,6 +128,9 @@ class Video extends StatefulWidget {
   /// Controls, subtitles and lifecycle behavior remain active when disabled.
   final bool renderTexture;
 
+  /// Suppress inline frames while keeping the controller and controls mounted.
+  final ValueListenable<bool>? hideInlineVideo;
+
   /// Whether a native video window should remain visible while this widget is
   /// retained in an offstage page. Fullscreen routes set this explicitly.
   final bool nativeWindowVisible;
@@ -153,6 +157,7 @@ class Video extends StatefulWidget {
     this.onExitFullscreen = defaultExitNativeFullscreen,
     this.focusNode,
     this.renderTexture = true,
+    this.hideInlineVideo,
     this.nativeWindowVisible = true,
   });
 
@@ -646,23 +651,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
       child: ValueListenableBuilder<VideoViewParameters>(
         valueListenable: videoViewParametersNotifier,
         builder: (context, videoViewParameters, _) {
-          final viewport = Container(
-            key: _nativeWindowViewportKey,
-            clipBehavior: Clip.none,
-            width: videoViewParameters.width,
-            height: videoViewParameters.height,
-            color: videoViewParameters.fill,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (!widget.renderTexture)
-                  ValueListenableBuilder<PlatformVideoController?>(
-                    valueListenable: widget.controller.notifier,
-                    builder: (context, _, __) {
-                      _scheduleNativeWindowSync();
-                      return const SizedBox.expand();
-                    },
-                  ),
+          final hideInlineVideo = widget.hideInlineVideo;
+          List<Widget> inlineLayers() => [
                 // Isolate the video texture into its own compositing layer.
                 // Without this boundary, any setState in the controls or
                 // subtitle layers forces Flutter to re-rasterize the entire
@@ -751,6 +741,38 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                         configuration:
                             videoViewParameters.subtitleViewConfiguration,
                       ),
+                    ),
+                  ),
+              ];
+          final viewport = Container(
+            key: _nativeWindowViewportKey,
+            clipBehavior: Clip.none,
+            width: videoViewParameters.width,
+            height: videoViewParameters.height,
+            color: videoViewParameters.fill,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (!widget.renderTexture)
+                  ValueListenableBuilder<PlatformVideoController?>(
+                    valueListenable: widget.controller.notifier,
+                    builder: (context, _, __) {
+                      _scheduleNativeWindowSync();
+                      return const SizedBox.expand();
+                    },
+                  ),
+                if (hideInlineVideo == null)
+                  ...inlineLayers()
+                else
+                  ValueListenableBuilder<bool>(
+                    valueListenable: hideInlineVideo,
+                    builder: (context, hidden, child) => Offstage(
+                      offstage: hidden,
+                      child: child,
+                    ),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: inlineLayers(),
                     ),
                   ),
                 if (videoViewParameters.controls != null)

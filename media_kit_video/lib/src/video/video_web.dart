@@ -8,6 +8,7 @@ import 'dart:js_interop';
 
 import 'package:web/web.dart';
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
@@ -124,6 +125,9 @@ class Video extends StatefulWidget {
   /// its HTML video element.
   final bool renderTexture;
 
+  /// Suppress inline frames while keeping the controller and controls mounted.
+  final ValueListenable<bool>? hideInlineVideo;
+
   /// Kept for API parity with native platforms. Web has no native video HWND.
   final bool nativeWindowVisible;
 
@@ -149,6 +153,7 @@ class Video extends StatefulWidget {
     this.onExitFullscreen = defaultExitNativeFullscreen,
     this.focusNode,
     this.renderTexture = true,
+    this.hideInlineVideo,
     this.nativeWindowVisible = true,
   });
 

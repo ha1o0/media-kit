@@ -86,6 +86,7 @@ Future<void> enterFullscreen(BuildContext context) {
                             onExitFullscreen:
                                 stateValue.widget.onExitFullscreen,
                             renderTexture: renderTexture,
+                            hideInlineVideo: stateValue.widget.hideInlineVideo,
                             nativeWindowVisible: true,
                           ),
                         ),

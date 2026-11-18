@@ -37,7 +37,7 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
 
   deinit {
     disposePixelBuffer()
-    disposeMPV()
+    releaseRenderContext()
     OpenGLESHelpers.deleteTextureCache(textureCache)
 
     // Deleting the context may cause potential RAM or VRAM memory leaks, as it
@@ -129,16 +129,16 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
     mpv_render_context_set_update_callback(
       renderContext,
       { (ctx) in
-        let that = unsafeBitCast(ctx, to: TextureHW.self)
-        DispatchQueue.main.async {
-          that.updateCallback()
-        }
+        let callback = Unmanaged<TextureHW>.fromOpaque(ctx!).takeUnretainedValue().updateCallback
+        DispatchQueue.main.async(execute: callback)
       },
       UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
     )
   }
 
-  private func disposeMPV() {
+  func releaseRenderContext() {
+    guard let renderContext = renderContext else { return }
+    self.renderContext = nil
     EAGLContext.setCurrent(context)
     defer {
       OpenGLESHelpers.checkError("disposeMPV")

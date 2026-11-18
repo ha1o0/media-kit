@@ -32,14 +32,19 @@ public class TextureSW: NSObject, FlutterTexture, ResizableTextureProtocol {
 
     super.init()
 
-    DispatchQueue.main.async {
-      self.initMPV()
-    }
+    #if os(iOS)
+      // VideoOutput owns the render context on its worker, including swaps.
+      initMPV()
+    #else
+      DispatchQueue.main.async {
+        self.initMPV()
+      }
+    #endif
   }
 
   deinit {
     disposePixelBuffer()
-    disposeMPV()
+    releaseRenderContext()
   }
 
   public func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
@@ -67,16 +72,16 @@ public class TextureSW: NSObject, FlutterTexture, ResizableTextureProtocol {
     mpv_render_context_set_update_callback(
       renderContext,
       { (ctx) in
-        let that = unsafeBitCast(ctx, to: TextureSW.self)
-        DispatchQueue.main.async {
-          that.updateCallback()
-        }
+        let callback = Unmanaged<TextureSW>.fromOpaque(ctx!).takeUnretainedValue().updateCallback
+        DispatchQueue.main.async(execute: callback)
       },
       UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
     )
   }
 
-  private func disposeMPV() {
+  func releaseRenderContext() {
+    guard let renderContext = renderContext else { return }
+    self.renderContext = nil
     mpv_render_context_set_update_callback(renderContext, nil, nil)
     mpv_render_context_free(renderContext)
   }
