@@ -612,6 +612,7 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
   late bool mount;
   late bool visible;
   Timer? _timer;
+  final _activePointers = <int>{};
 
   double _brightnessValue = 0.0;
   bool _brightnessIndicator = false;
@@ -709,19 +710,7 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
         ],
       );
 
-      if (_theme(context).visibleOnMount) {
-        _timer = Timer(
-          _theme(context).controlsHoverDuration,
-          () {
-            if (mounted) {
-              setState(() {
-                visible = false;
-              });
-              unshiftSubtitle();
-            }
-          },
-        );
-      }
+      _restartHideTimer();
     }
   }
 
@@ -730,6 +719,7 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
     for (final subscription in subscriptions) {
       subscription.cancel();
     }
+    _timer?.cancel();
     _onBrightnessReset?.call();
     _timerSeekBackwardButton?.cancel();
     _timerSeekForwardButton?.cancel();
@@ -758,6 +748,25 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
     }
   }
 
+  void _restartHideTimer() {
+    _timer?.cancel();
+    if (!visible || _activePointers.isNotEmpty) return;
+    _timer = Timer(_theme(context).controlsHoverDuration, () {
+      if (!mounted) return;
+      setState(() => visible = false);
+      unshiftSubtitle();
+    });
+  }
+
+  void _keepControlsVisible(PointerDownEvent event) {
+    _activePointers.add(event.pointer);
+    _timer?.cancel();
+  }
+
+  void _finishInteraction(PointerEvent event) {
+    if (_activePointers.remove(event.pointer)) _restartHideTimer();
+  }
+
   void onTap() {
     if (!visible) {
       setState(() {
@@ -765,19 +774,9 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
         visible = true;
       });
       shiftSubtitle();
-      _timer?.cancel();
-      _timer = Timer(_theme(context).controlsHoverDuration, () {
-        if (mounted) {
-          setState(() {
-            visible = false;
-          });
-          unshiftSubtitle();
-        }
-      });
+      _restartHideTimer();
     } else {
-      setState(() {
-        visible = false;
-      });
+      setState(() => visible = false);
       unshiftSubtitle();
       _timer?.cancel();
     }
@@ -915,7 +914,7 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
         "The number of seekOnDoubleTapLayoutTapsRatios must be 3, i.e. [1, 1, 1]");
     assert(_theme(context).seekOnDoubleTapLayoutWidgetRatios.length == 3,
         "The number of seekOnDoubleTapLayoutWidgetRatios must be 3, i.e. [1, 1, 1]");
-    return Theme(
+    final content = Theme(
       data: Theme.of(context).copyWith(
         focusColor: const Color(0x00000000),
         hoverColor: const Color(0x00000000),
@@ -1127,19 +1126,7 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
                                       onSeekStart: () {
                                         _timer?.cancel();
                                       },
-                                      onSeekEnd: () {
-                                        _timer = Timer(
-                                          _theme(context).controlsHoverDuration,
-                                          () {
-                                            if (mounted) {
-                                              setState(() {
-                                                visible = false;
-                                              });
-                                              unshiftSubtitle();
-                                            }
-                                          },
-                                        );
-                                      },
+                                      onSeekEnd: _restartHideTimer,
                                     ),
                                   Container(
                                     height: _theme(context).buttonBarHeight,
@@ -1588,6 +1575,13 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
           ),
         ),
       ),
+    );
+    if (_theme(context).gestureBuilder == null) return content;
+    return Listener(
+      onPointerDown: _keepControlsVisible,
+      onPointerUp: _finishInteraction,
+      onPointerCancel: _finishInteraction,
+      child: content,
     );
   }
 
