@@ -49,6 +49,15 @@ struct PictureInPictureFrameHandoff {
   }
 }
 
+enum DecodedPictureInPictureColorPolicy {
+  static func accepts(transfer: String?, primaries: String?) -> Bool {
+    // Decoder-owned CVPixelBuffers may omit Core Video transfer attachments.
+    // Check mpv's stream metadata too, so an 8-bit HDR surface cannot be
+    // mistaken for SDR merely because its pixel format is NV12.
+    primaries == "bt.709" && ["bt.1886", "srgb", "gamma2.2", "gamma2.4"].contains(transfer ?? "")
+  }
+}
+
 /// AVKit consumes frames on the main queue. If that queue is delayed during a
 /// lifecycle transition, keep the newest frame instead of queuing IOSurfaces.
 final class LatestPictureInPictureFrame<Frame> {

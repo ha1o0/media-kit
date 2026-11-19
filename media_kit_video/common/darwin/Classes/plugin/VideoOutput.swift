@@ -408,6 +408,13 @@ public class VideoOutput: NSObject {
         var value = 0.0
         guard mpv_get_property(handle, property, MPV_FORMAT_DOUBLE, &value) >= 0, value == 0 else { return false }
       }
+      func videoParameter(_ property: String) -> String? {
+        guard let value = mpv_get_property_string(handle, "video-out-params/\(property)") else { return nil }
+        defer { mpv_free(value) }
+        return String(cString: value)
+      }
+      guard DecodedPictureInPictureColorPolicy.accepts(
+        transfer: videoParameter("gamma"), primaries: videoParameter("primaries")) else { return false }
       return MPVHelpers.getVideoOutParams(handle).rotate == 0
     }
 
