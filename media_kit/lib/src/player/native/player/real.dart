@@ -89,6 +89,7 @@ void nativeEnsureInitialized({String? libmpv}) {
 /// {@endtemplate}
 class NativePlayer extends PlatformPlayer {
   late final _subtitleErrorRouter = NativeSubtitleErrorRouter(
+    deferHardwareCopyBackToMpv: Platform.isIOS,
     emitError: (error) {
       if (!errorController.isClosed) errorController.add(error);
     },

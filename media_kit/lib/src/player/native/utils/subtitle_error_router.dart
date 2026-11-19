@@ -6,11 +6,15 @@ import 'dart:async';
 /// Audio decoder diagnostics retain their source for playback classification.
 class NativeSubtitleErrorRouter {
   final void Function(String error) emitError;
+  final bool deferHardwareCopyBackToMpv;
   final _loads = <Object, _SubtitleLoad>{};
   final _deferred = <_TransportError>[];
   String? _mediaUri;
 
-  NativeSubtitleErrorRouter({required this.emitError});
+  NativeSubtitleErrorRouter({
+    required this.emitError,
+    this.deferHardwareCopyBackToMpv = false,
+  });
 
   void reset({String? mediaUri}) {
     _mediaUri = mediaUri;
@@ -55,6 +59,14 @@ class NativeSubtitleErrorRouter {
   }
 
   void logError(String prefix, String text) {
+    // vd_lavc emits this immediately before initiating decoder fallback.
+    // Keep it in Player.stream.log, but wait for END_FILE(ERROR) if the
+    // fallback actually fails; closing media here prevents mpv recovering.
+    if (deferHardwareCopyBackToMpv &&
+        prefix == 'vd' &&
+        text == 'Could not copy back hardware decoded frame.') {
+      return;
+    }
     if (prefix == 'ffmpeg') {
       if (!text.startsWith('tcp:')) return;
       if (_loads.isNotEmpty && !_targetsOnlyPrimaryEndpoint(text)) {
