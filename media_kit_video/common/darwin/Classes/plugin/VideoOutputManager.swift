@@ -56,6 +56,16 @@ public class VideoOutputManager: NSObject {
     return videoOutput!.setPostProcessingEffect(effect, enabled: enabled)
   }
 
+  #if os(iOS)
+    public func copyArtwork(handle: Int64, completion: @escaping (Data?) -> Void) {
+      guard let output = videoOutputs[handle] else {
+        completion(nil)
+        return
+      }
+      output.copyArtwork(completion: completion)
+    }
+  #endif
+
   public func destroy(
     handle: Int64
   ) {

@@ -2539,6 +2539,9 @@ class NativePlayer extends PlatformPlayer {
         'dither': 'no',
         'cache': 'yes',
         'cache-on-disk': 'yes',
+        // iOS has no usable default mpv cache directory. Without this, mpv
+        // silently retains demuxed packets in RAM after file-cache creation fails.
+        if (Platform.isIOS) 'demuxer-cache-dir': Directory.systemTemp.path,
         'hr-seek': 'yes',
         'hr-seek-framedrop': 'no',
         'correct-downscaling': 'no',

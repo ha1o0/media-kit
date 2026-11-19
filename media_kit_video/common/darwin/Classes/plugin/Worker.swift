@@ -37,7 +37,11 @@ class Worker {
       }
 
       let job = getFirstJob()
-      job()
+      #if os(iOS)
+        autoreleasepool { job() }
+      #else
+        job()
+      #endif
     }
   }
 

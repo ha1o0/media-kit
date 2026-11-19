@@ -59,6 +59,17 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       handleSetAnime4KEnabledMethodCall(call.arguments, result)
     case "VideoOutputManager.SetPostProcessingEffect":
       handleSetPostProcessingEffectMethodCall(call.arguments, result)
+    #if os(iOS)
+      case "VideoOutputManager.CopyArtwork":
+        guard let args = call.arguments as? [String: Any],
+          let value = args["handle"] as? String, let handle = Int64(value) else {
+          result(nil)
+          return
+        }
+        videoOutputManager.copyArtwork(handle: handle) { data in
+          result(data.map { FlutterStandardTypedData(bytes: $0) })
+        }
+    #endif
     case "VideoOutputManager.Dispose":
       handleDisposeMethodCall(call.arguments, result)
     case "Utils.EnterNativeFullscreen":

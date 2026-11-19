@@ -318,6 +318,20 @@ public class VideoOutput: NSObject {
     }
   }
 
+  #if os(iOS)
+    public func copyArtwork(completion: @escaping (Data?) -> Void) {
+      worker.enqueue { [weak self] in
+        let data: Data?
+        if let self = self, !self.disposed, let frame = self.inlineTexture.latestFrame {
+          data = VideoArtwork.encode(frame)
+        } else {
+          data = nil
+        }
+        DispatchQueue.main.async { completion(data) }
+      }
+    }
+  #endif
+
   public func updateCallback() {
     worker.enqueue {
       self._updateCallback()
