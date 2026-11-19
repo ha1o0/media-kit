@@ -1,7 +1,7 @@
 all: Frameworks/*.xcframework Frameworks/.symlinks
 
-MPV_XCFRAMEWORKS_VERSION=v2.27.0-ios.2
-MPV_XCFRAMEWORKS_SHA256SUM=61424effa183642bc2af9b83275ec2139acecd4785e55e2698fc8a74729d5906
+MPV_XCFRAMEWORKS_VERSION=v2.27.0-ios.3
+MPV_XCFRAMEWORKS_SHA256SUM=043112acac127c4fa3d9c4ca38872885fc6addced46c1aed99926185f99d8131
 
 TAR=tar
 TAR_WILDCARDS_FLAG := $(shell ${TAR} --version 2>&1 | grep -q 'GNU' && echo "--wildcards" || echo "")
