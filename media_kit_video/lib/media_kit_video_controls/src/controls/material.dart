@@ -275,6 +275,13 @@ class MaterialVideoControlsThemeData {
   /// Show the current seek position and duration beside the track.
   final bool showSeekBarTimeLabels;
 
+  /// Text style for both time labels when [showSeekBarTimeLabels] is enabled.
+  final TextStyle seekBarTimeLabelStyle;
+
+  /// Padding for the elapsed label, mirrored for the duration label.
+  /// Start faces the outside of the control bar; end faces the track.
+  final EdgeInsetsDirectional seekBarTimeLabelPadding;
+
   /// Height of the seek bar.
   final double seekBarHeight;
 
@@ -390,6 +397,13 @@ class MaterialVideoControlsThemeData {
     this.buttonBarButtonColor = const Color(0xFFFFFFFF),
     this.seekBarMargin = EdgeInsets.zero,
     this.showSeekBarTimeLabels = false,
+    this.seekBarTimeLabelStyle = const TextStyle(
+      fontSize: 11,
+      color: Colors.white,
+    ),
+    this.seekBarTimeLabelPadding = const EdgeInsetsDirectional.symmetric(
+      horizontal: 12,
+    ),
     this.seekBarHeight = 2.4,
     this.seekBarContainerHeight = 36.0,
     this.seekBarColor = const Color(0x3DFFFFFF),
@@ -455,6 +469,8 @@ class MaterialVideoControlsThemeData {
     Color? buttonBarButtonColor,
     EdgeInsets? seekBarMargin,
     bool? showSeekBarTimeLabels,
+    TextStyle? seekBarTimeLabelStyle,
+    EdgeInsetsDirectional? seekBarTimeLabelPadding,
     double? seekBarHeight,
     double? seekBarContainerHeight,
     Color? seekBarColor,
@@ -538,6 +554,10 @@ class MaterialVideoControlsThemeData {
       buttonBarButtonColor: buttonBarButtonColor ?? this.buttonBarButtonColor,
       seekBarMargin: seekBarMargin ?? this.seekBarMargin,
       showSeekBarTimeLabels: showSeekBarTimeLabels ?? this.showSeekBarTimeLabels,
+      seekBarTimeLabelStyle:
+          seekBarTimeLabelStyle ?? this.seekBarTimeLabelStyle,
+      seekBarTimeLabelPadding:
+          seekBarTimeLabelPadding ?? this.seekBarTimeLabelPadding,
       seekBarHeight: seekBarHeight ?? this.seekBarHeight,
       seekBarContainerHeight:
           seekBarContainerHeight ?? this.seekBarContainerHeight,
@@ -1894,23 +1914,68 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
       final total = value.inSeconds.clamp(0, 359999);
       final minutes = (total ~/ 60 % 60).toString().padLeft(2, '0');
       final seconds = (total % 60).toString().padLeft(2, '0');
-      return total >= 3600 ? '${total ~/ 3600}:$minutes:$seconds' : '$minutes:$seconds';
+      return total >= 3600
+          ? '${total ~/ 3600}:$minutes:$seconds'
+          : '$minutes:$seconds';
     }
-    Widget label(String value, String id) => Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: Text(value, key: ValueKey(id),
-        style: const TextStyle(fontSize: 11, color: Colors.white),
-        textScaler: MediaQuery.textScalerOf(context).clamp(maxScaleFactor: 1.3)),
-    );
+    final theme = _theme(context);
+    final padding = theme.seekBarTimeLabelPadding;
+    Widget label(String value, String id, double maxWidth, {bool end = false}) {
+      return ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: Padding(
+          padding: end
+              ? EdgeInsetsDirectional.fromSTEB(
+                  padding.end,
+                  padding.top,
+                  padding.start,
+                  padding.bottom,
+                )
+              : padding,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: end
+                ? AlignmentDirectional.centerEnd
+                : AlignmentDirectional.centerStart,
+            child: Text(
+              value,
+              key: ValueKey(id),
+              style: theme.seekBarTimeLabelStyle,
+              textScaler:
+                  MediaQuery.textScalerOf(context).clamp(maxScaleFactor: 1.3),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Container(
       clipBehavior: Clip.none,
-      margin: _theme(context).seekBarMargin,
-      child: _theme(context).showSeekBarTimeLabels
-          ? Row(children: [
-              label(time(tapped ? duration * slider : position), 'player-elapsed-time'),
-              Expanded(child: track),
-              label(time(duration), 'player-total-time'),
-            ])
+      margin: theme.seekBarMargin,
+      child: theme.showSeekBarTimeLabels
+          ? LayoutBuilder(
+              builder: (context, constraints) {
+                // Even two hour-long labels must leave room for scrubbing on
+                // narrow embedded surfaces or at large accessibility sizes.
+                final labelWidth = constraints.maxWidth * .4;
+                return Row(
+                  children: [
+                    label(
+                      time(tapped ? duration * slider : position),
+                      'player-elapsed-time',
+                      labelWidth,
+                    ),
+                    Expanded(child: track),
+                    label(
+                      time(duration),
+                      'player-total-time',
+                      labelWidth,
+                      end: true,
+                    ),
+                  ],
+                );
+              },
+            )
           : track,
     );
   }
