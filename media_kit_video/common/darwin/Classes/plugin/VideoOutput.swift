@@ -3,20 +3,6 @@ import Foundation
 #if os(iOS)
   import Accelerate
   import UIKit
-
-  // PiP itself only changes where frames are presented. EAGL must be released
-  // when an active PiP session is leaving the foreground, but not on a
-  // foreground-only PiP round trip.
-  struct PictureInPictureRenderPolicy {
-    var appIsActive = true
-    var presenting = false
-
-    func usesSoftware(currentlySoftware: Bool) -> Bool {
-      if !appIsActive && presenting { return true }
-      if appIsActive && !presenting { return false }
-      return currentlySoftware
-    }
-  }
 #endif
 
 #if canImport(Flutter)
@@ -53,11 +39,26 @@ public class VideoOutput: NSObject {
   private let worker: Worker = .init()
   private var width: Int64?
   private var height: Int64?
-  private var texture: ResizableTextureProtocol!
+  #if os(iOS)
+    private var texture: IOSVideoFrameTexture!
+  #else
+    private var texture: ResizableTextureProtocol!
+  #endif
   private var textureId: Int64 = -1
   private var currentSize: CGSize = CGSize.zero
   private var disposed: Bool = false
   #if os(iOS)
+    private enum PiPFrameSource { case undecided, composited, decoded }
+    private let inlineTexture = InlineVideoTexture()
+    private var displayedSize = CGSize.zero
+    private var lastInlineSize = CGSize.zero
+    private var pipHandoff = PictureInPictureFrameHandoff()
+    private var pipHandoffStartedAt: DispatchTime?
+    private let pendingPipFrame = LatestPictureInPictureFrame<CVPixelBuffer>()
+    private var pipFrameSource = PiPFrameSource.undecided
+    private var drainsPictureInPictureFrames = false
+    private var sameContextPictureInPictureFailed = false
+    private let appActivity = PictureInPictureAppActivity()
     private var releasePictureInPictureRenderContext: (() -> Void)?
     private var hasUsedIosSurface = false
     private var pipObserver: NSObjectProtocol?
@@ -99,6 +100,10 @@ public class VideoOutput: NSObject {
         that.worker.enqueue { [weak that] in
           guard let that = that, !that.disposed else { return }
           that.pipFrameDelivery = frames
+          if !frames {
+            that.pendingPipFrame.discard()
+            that.pipFrameSource = .undecided
+          }
           that.pipPolicy.presenting = active
           that.updatePictureInPictureRenderer()
           if requestFrame && that.pipPolicy.appIsActive && that.pipFrameDelivery {
@@ -114,10 +119,18 @@ public class VideoOutput: NSObject {
         NotificationCenter.default.addObserver(
           forName: name, object: nil, queue: .main
         ) { [weak self] _ in
+          self?.appActivity.isActive = active
           self?.worker.enqueue { [weak self] in
             guard let self = self, !self.disposed else { return }
-            self.pipPolicy.appIsActive = active
+            let currentActivity = self.appActivity.isActive
+            self.pipPolicy.appIsActive = currentActivity
+            let wasDraining = self.drainsPictureInPictureFrames
+            if currentActivity { self.drainsPictureInPictureFrames = false }
             self.updatePictureInPictureRenderer()
+            if currentActivity {
+              if wasDraining { self._updateCallback() }
+              else { self.notifyInlineFrameIfActive() }
+            }
           }
         }
       }
@@ -175,18 +188,19 @@ public class VideoOutput: NSObject {
     // A request for the new backend may still be paired with the old locked
     // libmpv. Fall back without requiring a different app or player session.
     #if os(iOS)
-      if requestedHardwareAcceleration, renderBackend == "iosurface",
+      let wantsIosSurface = renderBackend == "iosurface" || renderBackend == "iosurface+decoded-pip"
+      if requestedHardwareAcceleration, wantsIosSurface,
         let metal = TextureIOSurface(handle: handle, updateCallback: { [weak self] in
           self?.updateCallback()
         }) {
         NSLog("VideoOutput: using gpu-next / Vulkan / MoltenVK IOSurface")
         hasUsedIosSurface = true
         releasePictureInPictureRenderContext = { [weak metal] in metal?.releaseRenderContext() }
-        texture = SafeResizableTexture(metal)
+        texture = metal
         registerTextureOnMainThread()
         return
       }
-      let legacyBackend = renderBackend == "iosurface" ? nil : renderBackend
+      let legacyBackend = wantsIosSurface ? nil : renderBackend
     #else
       let legacyBackend = renderBackend
     #endif
@@ -205,8 +219,10 @@ public class VideoOutput: NSObject {
       )
       #if os(iOS)
         releasePictureInPictureRenderContext = { [weak hardware] in hardware?.releaseRenderContext() }
+        texture = hardware
+      #else
+        texture = SafeResizableTexture(hardware)
       #endif
-      texture = SafeResizableTexture(hardware)
     } else {
       let software = TextureSW(
         handle: handle,
@@ -214,20 +230,40 @@ public class VideoOutput: NSObject {
       )
       #if os(iOS)
         releasePictureInPictureRenderContext = { [weak software] in software?.releaseRenderContext() }
+        texture = software
+      #else
+        texture = SafeResizableTexture(software)
       #endif
-      texture = SafeResizableTexture(software)
     }
     registerTextureOnMainThread()
   }
 
   private func registerTextureOnMainThread() {
+    #if os(iOS)
+      guard textureId < 0 else { return }
+    #endif
     DispatchQueue.main.sync { [weak self] in self?.registerTextureId() }
   }
 
   #if os(iOS)
     private func updatePictureInPictureRenderer() {
-      let active = pipPolicy.usesSoftware(currentlySoftware: pipRendering)
-      guard !disposed, active != pipRendering else { return }
+      guard !disposed else { return }
+      // AVKit's automatic-start callback may follow willResignActive. Drain
+      // the same decoder as soon as system frames are armed; never briefly
+      // submit GPU work while waiting for the PiP delegate in the background.
+      if renderBackend == "iosurface+decoded-pip", !sameContextPictureInPictureFailed,
+        let renderer = texture as? TextureIOSurface,
+        pipPolicy.usesSameDecoder(framesArmed: pipFrameDelivery,
+          supported: renderer.supportsSameContextPictureInPicture, currentlyDraining: drainsPictureInPictureFrames) {
+        if !drainsPictureInPictureFrames {
+          NSLog("VideoOutput: PiP continuing the existing decoder without inline GPU rendering")
+        }
+        drainsPictureInPictureFrames = true
+        return
+      }
+      let active = pipPolicy.usesSoftware(currentlySoftware: pipRendering, framesArmed: pipFrameDelivery)
+      guard active != pipRendering else { return }
+      drainsPictureInPictureFrames = false
       pipRendering = active
       if !enableHardwareAcceleration || (VideoOutput.isSimulator && !hasUsedIosSurface) {
         _updateCallback()
@@ -240,11 +276,14 @@ public class VideoOutput: NSObject {
       if let selectedVideo = selectedVideo { mpv_free(selectedVideo) }
       var paused: Int32 = 1
       _ = mpv_get_property(handle, "pause", MPV_FORMAT_FLAG, &paused)
-      let previous = textureId
-      DispatchQueue.main.sync { self.registry.unregisterTexture(previous) }
-      // Unregistering the Flutter texture can leave it retained on the raster
-      // thread. Explicitly free its mpv context on the render worker before
-      // creating a replacement: libmpv allows only one context per player.
+      pipHandoff.begin()
+      pipHandoffStartedAt = .now()
+      NSLog("VideoOutput: PiP renderer handoff to %@", active ? "software" : "inline")
+      // Re-prime AVKit with the last valid image before the old video chain is
+      // torn down. Flutter retains the same texture ID and last frame as well.
+      if pipPolicy.presenting { deliverPictureInPictureFrame(force: true, handoff: true) }
+      // libmpv allows only one context per player. The new context may issue
+      // redraws before the reselected video track has produced a real frame.
       releasePictureInPictureRenderContext?()
       texture = nil
       currentSize = .zero
@@ -260,7 +299,11 @@ public class VideoOutput: NSObject {
   // Must be run on the main thread
   private func registerTextureId() {
     // Textures must be registered on the platform thread.
-    textureId = registry.register(texture)
+    #if os(iOS)
+      textureId = registry.register(inlineTexture)
+    #else
+      textureId = registry.register(texture)
+    #endif
     // textureUpdateCallback must run on the main thread
     textureUpdateCallback(textureId, CGSize(width: 0, height: 0))
   }
@@ -282,13 +325,28 @@ public class VideoOutput: NSObject {
   }
 
   private func _updateCallback() {
-    var size = videoSize
+    guard !disposed, texture != nil else { return }
     #if os(iOS)
+      if pipPolicy.appIsActive != appActivity.isActive {
+        pipPolicy.appIsActive = appActivity.isActive
+        updatePictureInPictureRenderer()
+      }
+      if drainsPictureInPictureFrames {
+        drainPictureInPictureFrame()
+        return
+      }
+      if !pipPolicy.appIsActive && !pipRendering { return }
+    #endif
+    let logicalSize = videoSize
+    #if os(iOS)
+      var size = logicalSize
       if pipRendering && max(size.width, size.height) > 640 {
         let ratio = 640 / max(size.width, size.height)
         size = CGSize(width: max(2, (size.width * ratio).rounded(.down)),
           height: max(2, (size.height * ratio).rounded(.down)))
       }
+    #else
+      let size = logicalSize
     #endif
 
     if size.width == 0 || size.height == 0 {
@@ -299,36 +357,145 @@ public class VideoOutput: NSObject {
       currentSize = size
 
       texture.resize(size)
-      DispatchQueue.main.sync { [weak self] in
-        guard let that = self else { return }
-        // textureUpdateCallback must run on the main thread
-        that.textureUpdateCallback(that.textureId, size)
-      }
+      #if !os(iOS)
+        DispatchQueue.main.sync { [weak self] in
+          guard let that = self else { return }
+          // textureUpdateCallback must run on the main thread
+          that.textureUpdateCallback(that.textureId, size)
+        }
+      #endif
     }
 
     if disposed {
       return
     }
 
-    texture.render(size)
     #if os(iOS)
-      deliverPictureInPictureFrame()
+      guard texture.renderVideoFrame(size, needsDecodedFrame: pipHandoff.needsDecodedFrame),
+        let frame = texture.copyPixelBuffer()?.takeRetainedValue() else { return }
+      let firstAfterHandoff = pipHandoff.needsDecodedFrame
+      pipHandoff.didPublishFrame()
+      displayedSize = logicalSize
+      inlineTexture.publish(frame)
+      deliverPictureInPictureFrame(handoff: firstAfterHandoff && pipPolicy.presenting)
+      if let start = pipHandoffStartedAt {
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+        NSLog("VideoOutput: PiP first decoded replacement in %.1f ms", elapsed)
+        pipHandoffStartedAt = nil
+      }
+      notifyInlineFrameIfActive()
+    #else
+      texture.render(size)
+      DispatchQueue.main.sync { [weak self] in
+        guard let that = self else { return }
+        // Textures must be marked as available from the main thread
+        that.registry.textureFrameAvailable(that.textureId)
+      }
     #endif
-    DispatchQueue.main.sync { [weak self] in
-      guard let that = self else { return }
-      // Textures must be marked as available from the main thread
-      that.registry.textureFrameAvailable(that.textureId)
-    }
   }
 
   #if os(iOS)
-    private func deliverPictureInPictureFrame(force: Bool = false) {
+    private func permitsDecodedPictureInPicture() -> Bool {
+      guard renderBackend == "iosurface+decoded-pip" else { return false }
+      // A direct sample is before mpv's OSD and output transform.
+      for property in ["sid", "secondary-sid"] {
+        guard let selected = mpv_get_property_string(handle, property) else { return false }
+        let disabled = String(cString: selected) == "no"
+        mpv_free(selected)
+        if !disabled { return false }
+      }
+      for property in ["brightness", "contrast", "gamma", "hue", "saturation", "video-zoom", "panscan"] {
+        var value = 0.0
+        guard mpv_get_property(handle, property, MPV_FORMAT_DOUBLE, &value) >= 0, value == 0 else { return false }
+      }
+      return MPVHelpers.getVideoOutParams(handle).rotate == 0
+    }
+
+    private func isSupportedDecodedPictureInPictureFrame(_ pixel: CVPixelBuffer) -> Bool {
+      // Keep HDR on the existing composited PiP color policy.
+      let format = CVPixelBufferGetPixelFormatType(pixel)
+      guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+        format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else { return false }
+      if #available(iOS 11.0, *),
+        let transfer = CVBufferGetAttachment(pixel, kCVImageBufferTransferFunctionKey, nil)?.takeUnretainedValue(),
+        CFEqual(transfer, kCVImageBufferTransferFunction_ITU_R_2100_HLG) ||
+          CFEqual(transfer, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) {
+        return false
+      }
+      let width = CVPixelBufferGetWidth(pixel), height = CVPixelBufferGetHeight(pixel)
+      guard height > 0, displayedSize.width > 0, displayedSize.height > 0 else { return false }
+      let sourceAspect = Double(width) / Double(height)
+      return abs(sourceAspect - Double(displayedSize.width / displayedSize.height)) < 0.01
+    }
+
+    private func drainPictureInPictureFrame() {
+      guard let renderer = texture as? TextureIOSurface else { return }
+      if pipFrameDelivery, permitsDecodedPictureInPicture(),
+        let peek = renderer.decodedPictureInPictureFrame(dequeue: false).pixel,
+        isSupportedDecodedPictureInPictureFrame(peek) {
+        let next = renderer.decodedPictureInPictureFrame(dequeue: true)
+        if next.supported {
+          if let frame = next.pixel, isSupportedDecodedPictureInPictureFrame(frame) {
+            pipFrameSource = .decoded
+            enqueuePictureInPictureFrame(frame, handoff: false)
+          } else if next.pixel != nil {
+            // A format switch was consumed on this callback. Compose the
+            // current frame without restarting the decoder or dropping text.
+            let composed = renderer.compositedPictureInPictureFrame(videoSize, deliver: true)
+            if let frame = composed.pixel {
+              pipFrameSource = .composited
+              enqueuePictureInPictureFrame(frame, handoff: false)
+            }
+          }
+          return
+        }
+      }
+      let next = renderer.compositedPictureInPictureFrame(videoSize, deliver: pipFrameDelivery)
+      if let frame = next.pixel {
+        pipFrameSource = .composited
+        enqueuePictureInPictureFrame(frame, handoff: false)
+      } else if !next.supported {
+        // Rare formats that cannot be mapped keep the held PiP image while
+        // using the legacy compatibility renderer. The primary GPU stays idle.
+        sameContextPictureInPictureFailed = true
+        drainsPictureInPictureFrames = false
+        updatePictureInPictureRenderer()
+      }
+    }
+
+    private func notifyInlineFrameIfActive() {
+      guard pipPolicy.appIsActive, displayedSize != .zero else { return }
+      let size = displayedSize
+      DispatchQueue.main.sync { [weak self] in
+        guard let self = self, !self.disposed, self.textureId >= 0,
+          UIApplication.shared.applicationState == .active else { return }
+        if self.lastInlineSize != size {
+          self.lastInlineSize = size
+          self.textureUpdateCallback(self.textureId, size)
+        }
+        self.registry.textureFrameAvailable(self.textureId)
+      }
+    }
+
+    private func deliverPictureInPictureFrame(force: Bool = false, handoff: Bool = false) {
       // Automatic PiP only takes a preview twice per second when armed. A
       // live foreground PiP needs every frame, but never resizes mpv's output.
       let previewTime = CFAbsoluteTimeGetCurrent()
       guard pipFrameDelivery, force || pipPolicy.presenting || previewTime - lastPipPreviewFrame >= 0.5,
-        let pixel = texture?.copyPixelBuffer()?.takeRetainedValue(),
-        CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_32BGRA else { return }
+        let pixel = inlineTexture.latestFrame else { return }
+      if permitsDecodedPictureInPicture() {
+        if let renderer = texture as? TextureIOSurface,
+          let decoded = renderer.decodedPictureInPictureFrame(dequeue: false).pixel,
+          isSupportedDecodedPictureInPictureFrame(decoded) {
+          if pipFrameSource != .decoded { NSLog("VideoOutput: PiP using decoder-owned VideoToolbox frames") }
+          pipFrameSource = .decoded
+          lastPipPreviewFrame = previewTime
+          enqueuePictureInPictureFrame(decoded, handoff: handoff)
+          return
+        }
+      }
+      pipFrameSource = .composited
+      guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_32BGRA else { return }
       let sourceWidth = CVPixelBufferGetWidth(pixel)
       let sourceHeight = CVPixelBufferGetHeight(pixel)
       guard sourceWidth > 0, sourceHeight > 0 else { return }
@@ -366,10 +533,16 @@ public class VideoOutput: NSObject {
       }
       CVPixelBufferUnlockBaseAddress(copy, [])
       guard converted else { return }
+      enqueuePictureInPictureFrame(copy, handoff: handoff)
+    }
+
+    private func enqueuePictureInPictureFrame(_ pixel: CVPixelBuffer, handoff: Bool) {
+      guard pendingPipFrame.store(pixel, handoff: handoff) else { return }
       let identity = String(Int(bitPattern: handle))
-      DispatchQueue.main.async {
+      DispatchQueue.main.async { [weak self] in
+        guard let frame = self?.pendingPipFrame.take() else { return }
         NotificationCenter.default.post(name: Notification.Name("bota.mobile-video-frame"), object: nil,
-          userInfo: ["identity": identity, "pixelBuffer": copy])
+          userInfo: ["identity": identity, "pixelBuffer": frame.frame, "renderHandoff": frame.handoff])
       }
     }
   #endif

@@ -5,7 +5,7 @@ import OpenGLES
   import Mpv
 #endif
 
-public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
+public class TextureHW: NSObject, FlutterTexture, IOSVideoFrameTexture {
   public typealias UpdateCallback = () -> Void
 
   private let handle: OpaquePointer
@@ -188,24 +188,27 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
   }
 
   public func render(_ size: CGSize) {
-    let textureContext = textureContexts.nextAvailable()
-    if textureContext == nil {
-      return
-    }
+    _ = renderVideoFrame(size, needsDecodedFrame: false)
+  }
 
+  func renderVideoFrame(_ size: CGSize, needsDecodedFrame: Bool) -> Bool {
+    guard let renderContext = renderContext else { return false }
     EAGLContext.setCurrent(context)
     defer {
       OpenGLESHelpers.checkError("render")
       EAGLContext.setCurrent(nil)
     }
 
-    glBindFramebuffer(GLenum(GL_FRAMEBUFFER), textureContext!.frameBuffer)
+    guard !needsDecodedFrame || MPVHelpers.prepareDecodedPictureInPictureFrame(renderContext),
+      let textureContext = textureContexts.nextAvailable() else { return false }
+
+    glBindFramebuffer(GLenum(GL_FRAMEBUFFER), textureContext.frameBuffer)
     defer {
       glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
     }
 
     var fbo = mpv_opengl_fbo(
-      fbo: Int32(textureContext!.frameBuffer),
+      fbo: Int32(textureContext.frameBuffer),
       w: Int32(size.width),
       h: Int32(size.height),
       internal_format: 0
@@ -217,11 +220,15 @@ public class TextureHW: NSObject, FlutterTexture, ResizableTextureProtocol {
       mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
     ]
 
-    mpv_render_context_render(renderContext, &params)
+    guard mpv_render_context_render(renderContext, &params) >= 0 else {
+      textureContexts.recycle(textureContext)
+      return false
+    }
 
     glFlush()
 
-    textureContexts.pushAsReady(textureContext!)
+    textureContexts.pushAsReady(textureContext)
+    return true
   }
 
   static private func getProcAddress(

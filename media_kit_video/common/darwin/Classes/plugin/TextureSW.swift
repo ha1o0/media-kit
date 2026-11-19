@@ -113,9 +113,17 @@ public class TextureSW: NSObject, FlutterTexture, ResizableTextureProtocol {
   }
 
   public func render(_ size: CGSize) {
+    _ = renderVideoFrame(size, needsDecodedFrame: false)
+  }
+
+  func renderVideoFrame(_ size: CGSize, needsDecodedFrame: Bool) -> Bool {
+    guard let renderContext = renderContext else { return false }
+    #if os(iOS)
+      guard !needsDecodedFrame || MPVHelpers.prepareDecodedPictureInPictureFrame(renderContext) else { return false }
+    #endif
     let textureContext = textureContexts.nextAvailable()
     if textureContext == nil {
-      return
+      return false
     }
 
     CVPixelBufferLockBaseAddress(
@@ -152,8 +160,19 @@ public class TextureSW: NSObject, FlutterTexture, ResizableTextureProtocol {
       mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
     ]
 
-    mpv_render_context_render(renderContext, &params)
+    let status = mpv_render_context_render(renderContext, &params)
+    #if os(iOS)
+      guard status >= 0 else {
+        textureContexts.recycle(textureContext!)
+        return false
+      }
+    #endif
 
     textureContexts.pushAsReady(textureContext!)
+    return true
   }
 }
+
+#if os(iOS)
+  extension TextureSW: IOSVideoFrameTexture {}
+#endif

@@ -9,10 +9,13 @@ import IOSurface
 
 /// libmpv gpu-next renders an IOSurface with Vulkan/MoltenVK. Flutter and AVKit
 /// still receive the same BGRA CVPixelBuffer contract as the other textures.
-final class TextureIOSurface: NSObject, ResizableTextureProtocol {
+final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private let updateCallback: () -> Void
   private let frameLock = NSLock()
   private var currentFrame: CVPixelBuffer?
+  private var pipPool: CVPixelBufferPool?
+  private var pipPoolSize = CGSize.zero
+  private var sameContextPipSupport: Bool?
   private var pool: CVPixelBufferPool?
   private var poolSize: CGSize = .zero
   private var nextAllocation = DispatchTime(uptimeNanoseconds: 0)
@@ -57,6 +60,102 @@ final class TextureIOSurface: NSObject, ResizableTextureProtocol {
     mpv_render_context_free(renderContext)
   }
 
+  /// Peek while inline, or consume a timed frame without GPU work in PiP.
+  /// The caller must first establish support with a successful inline peek;
+  /// an older libmpv would otherwise ignore the private render parameter.
+  func decodedPictureInPictureFrame(dequeue: Bool) -> (supported: Bool, pixel: CVPixelBuffer?) {
+    guard let renderContext = renderContext else { return (false, nil) }
+    var output: UnsafeMutableRawPointer?
+    var skip: Int32 = 1
+    let status = withUnsafeMutablePointer(to: &output) { outputPointer in
+      // New producer headers name this MPV_RENDER_PARAM_IOS_PIP_FRAME.
+      let frame = mpv_render_param(type: mpv_render_param_type(rawValue: 25),
+        data: UnsafeMutableRawPointer(outputPointer))
+      if !dequeue { return mpv_render_context_get_info(renderContext, frame) }
+      return withUnsafeMutablePointer(to: &skip) { skipPointer in
+        var params = [frame,
+          mpv_render_param(type: MPV_RENDER_PARAM_SKIP_RENDERING, data: UnsafeMutableRawPointer(skipPointer)),
+          mpv_render_param()]
+        return mpv_render_context_render(renderContext, &params)
+      }
+    }
+    let pixel = output.map { Unmanaged<CVPixelBuffer>.fromOpaque($0).takeRetainedValue() }
+    return (status >= 0, status >= 0 ? pixel : nil)
+  }
+
+  var supportsSameContextPictureInPicture: Bool {
+    if let supported = sameContextPipSupport { return supported }
+    guard let renderContext = renderContext else { return false }
+    var supported: Int32 = 0
+    let status = withUnsafeMutablePointer(to: &supported) { pointer in
+      mpv_render_context_get_info(renderContext, mpv_render_param(
+        type: mpv_render_param_type(rawValue: 26), data: UnsafeMutableRawPointer(pointer)))
+    }
+    sameContextPipSupport = status >= 0 && supported == 1
+    return sameContextPipSupport == true
+  }
+
+  /// Compose subtitles / transformed or software frames on the same decoder.
+  /// The private parameter bypasses every primary GPU operation, including
+  /// pending reconfiguration. Never send it to a library that failed the probe.
+  func compositedPictureInPictureFrame(_ size: CGSize, deliver: Bool) -> (supported: Bool, pixel: CVPixelBuffer?) {
+    guard supportsSameContextPictureInPicture, let renderContext = renderContext else { return (false, nil) }
+    var mode: Int32 = 1
+    var skip: Int32 = 1
+    return withUnsafeMutablePointer(to: &mode) { modePointer in
+      withUnsafeMutablePointer(to: &skip) { skipPointer in
+        var params = [
+          mpv_render_param(type: mpv_render_param_type(rawValue: 26), data: UnsafeMutableRawPointer(modePointer)),
+          mpv_render_param(type: MPV_RENDER_PARAM_SKIP_RENDERING, data: UnsafeMutableRawPointer(skipPointer)),
+        ]
+        func consume() -> (supported: Bool, pixel: CVPixelBuffer?) {
+          var consumeParams = params + [mpv_render_param()]
+          let status = mpv_render_context_render(renderContext, &consumeParams)
+          return (status >= 0, nil)
+        }
+        guard deliver, size.width > 0, size.height > 0 else { return consume() }
+        let ratio = min(1, 640 / max(size.width, size.height))
+        let targetSize = CGSize(width: max(1, (size.width * ratio).rounded(.down)),
+          height: max(1, (size.height * ratio).rounded(.down)))
+        if pipPoolSize != targetSize || pipPool == nil {
+          pipPool = nil
+          pipPoolSize = targetSize
+          let attributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: Int(targetSize.width),
+            kCVPixelBufferHeightKey as String: Int(targetSize.height),
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+          ]
+          CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &pipPool)
+        }
+        var frame: CVPixelBuffer?
+        let limits = [kCVPixelBufferPoolAllocationThresholdKey: 3] as CFDictionary
+        guard let pool = pipPool,
+          CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(nil, pool, limits, &frame) == kCVReturnSuccess,
+          let frame = frame,
+          CVPixelBufferLockBaseAddress(frame, []) == kCVReturnSuccess else { return consume() }
+        defer { CVPixelBufferUnlockBaseAddress(frame, []) }
+        guard let pixels = CVPixelBufferGetBaseAddress(frame) else { return consume() }
+        var dimensions: [Int32] = [Int32(targetSize.width), Int32(targetSize.height)]
+        var stride = CVPixelBufferGetBytesPerRow(frame)
+        let status = dimensions.withUnsafeMutableBytes { dimensionsPointer in
+          withUnsafeMutablePointer(to: &stride) { stridePointer in
+            "bgr0".withCString { formatPointer in
+              params += [
+                mpv_render_param(type: MPV_RENDER_PARAM_SW_SIZE, data: dimensionsPointer.baseAddress),
+                mpv_render_param(type: MPV_RENDER_PARAM_SW_FORMAT, data: UnsafeMutableRawPointer(mutating: formatPointer)),
+                mpv_render_param(type: MPV_RENDER_PARAM_SW_STRIDE, data: UnsafeMutableRawPointer(stridePointer)),
+                mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: pixels), mpv_render_param(),
+              ]
+              return mpv_render_context_render(renderContext, &params)
+            }
+          }
+        }
+        return (status >= 0 || status == MPV_ERROR_UNINITIALIZED.rawValue, status >= 0 ? frame : nil)
+      }
+    }
+  }
+
   func resize(_ size: CGSize) {
     nextAllocation = DispatchTime(uptimeNanoseconds: 0)
     // On devices such as iPhone XR, allocating four source-sized 4K BGRA
@@ -95,7 +194,12 @@ final class TextureIOSurface: NSObject, ResizableTextureProtocol {
   }
 
   func render(_ size: CGSize) {
-    guard let renderContext = renderContext else { return }
+    _ = renderVideoFrame(size, needsDecodedFrame: false)
+  }
+
+  func renderVideoFrame(_ size: CGSize, needsDecodedFrame: Bool) -> Bool {
+    guard let renderContext = renderContext,
+      !needsDecodedFrame || MPVHelpers.prepareDecodedPictureInPictureFrame(renderContext) else { return false }
     guard let frame = allocateFrame(), let surface = CVPixelBufferGetIOSurface(frame) else {
       // Still consume the pending mpv frame; otherwise the VO waits for us.
       var skip: Int32 = 1
@@ -106,7 +210,7 @@ final class TextureIOSurface: NSObject, ResizableTextureProtocol {
         ]
         _ = mpv_render_context_render(renderContext, &params)
       }
-      return
+      return false
     }
 
     var params = [
@@ -119,12 +223,13 @@ final class TextureIOSurface: NSObject, ResizableTextureProtocol {
         reportedRenderFailure = true
         NSLog("TextureIOSurface: mpv render failed (%d)", status)
       }
-      return
+      return false
     }
 
     frameLock.lock()
     currentFrame = frame
     frameLock.unlock()
+    return true
   }
 
   private func allocateFrame() -> CVPixelBuffer? {

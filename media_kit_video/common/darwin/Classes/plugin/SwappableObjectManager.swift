@@ -66,6 +66,15 @@ public class SwappableObjectManager<T> {
     updateCurrent()
   }
 
+  #if os(iOS)
+    // Return a write target that could not be rendered without exposing it.
+    func recycle(_ object: T) {
+      lock.lock()
+      defer { lock.unlock() }
+      available.append(object)
+    }
+  #endif
+
   public var current: T? {
     lock.lock()
     defer {
