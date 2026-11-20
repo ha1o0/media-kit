@@ -207,6 +207,10 @@ class MaterialVideoControlsThemeData {
   /// overlays can retain playback history across auto-hide transitions.
   final Widget? centerOverlay;
 
+  /// Non-interactive content shown after the regular controls finish hiding.
+  /// Uses the full video bounds, independent of the controls' safe-area padding.
+  final Widget? hiddenControlsOverlay;
+
   /// Replaces only the gesture area underneath the controls. The builder stays
   /// visible when controls fade and is reused by the fullscreen surface.
   final Widget Function(BuildContext, VoidCallback, VoidCallback)?
@@ -365,6 +369,7 @@ class MaterialVideoControlsThemeData {
     this.controlsTransitionDuration = const Duration(milliseconds: 300),
     this.bufferingIndicatorBuilder,
     this.centerOverlay,
+    this.hiddenControlsOverlay,
     this.gestureBuilder,
     this.volumeIndicatorBuilder,
     this.brightnessIndicatorBuilder,
@@ -449,6 +454,7 @@ class MaterialVideoControlsThemeData {
     Duration? controlsTransitionDuration,
     Widget Function(BuildContext)? bufferingIndicatorBuilder,
     Widget? centerOverlay,
+    Widget? hiddenControlsOverlay,
     Widget Function(BuildContext, VoidCallback, VoidCallback)? gestureBuilder,
     Widget Function(BuildContext, double)? volumeIndicatorBuilder,
     Widget Function(BuildContext, double)? brightnessIndicatorBuilder,
@@ -530,6 +536,7 @@ class MaterialVideoControlsThemeData {
       bufferingIndicatorBuilder:
           bufferingIndicatorBuilder ?? this.bufferingIndicatorBuilder,
       centerOverlay: centerOverlay ?? this.centerOverlay,
+      hiddenControlsOverlay: hiddenControlsOverlay ?? this.hiddenControlsOverlay,
       gestureBuilder: gestureBuilder ?? this.gestureBuilder,
       volumeIndicatorBuilder:
           volumeIndicatorBuilder ?? this.volumeIndicatorBuilder,
@@ -959,6 +966,14 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
               clipBehavior: Clip.none,
               alignment: Alignment.center,
               children: [
+                if (!visible &&
+                    !mount &&
+                    _theme(context).hiddenControlsOverlay != null)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: _theme(context).hiddenControlsOverlay!,
+                    ),
+                  ),
                 if (_theme(context).gestureBuilder != null)
                   Positioned.fill(
                     left: 16.0,
