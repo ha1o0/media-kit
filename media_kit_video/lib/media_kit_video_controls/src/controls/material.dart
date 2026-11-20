@@ -198,6 +198,10 @@ class MaterialVideoControlsThemeData {
   /// [Duration] for which the controls will be animated when shown or hidden.
   final Duration controlsTransitionDuration;
 
+  /// Fade each controls bar within its own paint bounds instead of combining
+  /// the top and bottom bars into a full-video offscreen layer.
+  final bool useBoundedControlsOpacityLayers;
+
   /// Builder for the buffering indicator.
   final Widget Function(BuildContext)? bufferingIndicatorBuilder;
 
@@ -206,6 +210,10 @@ class MaterialVideoControlsThemeData {
   /// Unlike [primaryButtonBar], this remains mounted while hidden so stateful
   /// overlays can retain playback history across auto-hide transitions.
   final Widget? centerOverlay;
+
+  /// Optional overlay that handles its own opacity within each painted region.
+  /// Takes precedence over [centerOverlay]; remains mounted while hidden.
+  final Widget Function(BuildContext, bool visible)? centerOverlayBuilder;
 
   /// Non-interactive content shown after the regular controls finish hiding.
   /// Uses the full video bounds, independent of the controls' safe-area padding.
@@ -373,8 +381,10 @@ class MaterialVideoControlsThemeData {
     this.padding,
     this.controlsHoverDuration = const Duration(seconds: 3),
     this.controlsTransitionDuration = const Duration(milliseconds: 300),
+    this.useBoundedControlsOpacityLayers = false,
     this.bufferingIndicatorBuilder,
     this.centerOverlay,
+    this.centerOverlayBuilder,
     this.hiddenControlsOverlay,
     this.onSeekPreviewChanged,
     this.seekOnRelease = false,
@@ -460,8 +470,10 @@ class MaterialVideoControlsThemeData {
     Color? backdropColor,
     Duration? controlsHoverDuration,
     Duration? controlsTransitionDuration,
+    bool? useBoundedControlsOpacityLayers,
     Widget Function(BuildContext)? bufferingIndicatorBuilder,
     Widget? centerOverlay,
+    Widget Function(BuildContext, bool visible)? centerOverlayBuilder,
     Widget? hiddenControlsOverlay,
     ValueChanged<Duration?>? onSeekPreviewChanged,
     bool? seekOnRelease,
@@ -543,9 +555,12 @@ class MaterialVideoControlsThemeData {
           controlsHoverDuration ?? this.controlsHoverDuration,
       controlsTransitionDuration:
           controlsTransitionDuration ?? this.controlsTransitionDuration,
+      useBoundedControlsOpacityLayers: useBoundedControlsOpacityLayers ??
+          this.useBoundedControlsOpacityLayers,
       bufferingIndicatorBuilder:
           bufferingIndicatorBuilder ?? this.bufferingIndicatorBuilder,
       centerOverlay: centerOverlay ?? this.centerOverlay,
+      centerOverlayBuilder: centerOverlayBuilder ?? this.centerOverlayBuilder,
       hiddenControlsOverlay: hiddenControlsOverlay ?? this.hiddenControlsOverlay,
       onSeekPreviewChanged: onSeekPreviewChanged ?? this.onSeekPreviewChanged,
       seekOnRelease: seekOnRelease ?? this.seekOnRelease,
@@ -806,6 +821,43 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
     if (_activePointers.remove(event.pointer)) _restartHideTimer();
   }
 
+  void _onControlsTransitionEnd() {
+    if (!visible && mount) setState(() => mount = false);
+  }
+
+  Widget _controlsTransition({required Widget child}) {
+    if (_theme(context).useBoundedControlsOpacityLayers) return child;
+    return AnimatedOpacity(
+      curve: Curves.easeInOut,
+      opacity: visible ? 1.0 : 0.0,
+      duration: _theme(context).controlsTransitionDuration,
+      onEnd: _onControlsTransitionEnd,
+      child: child,
+    );
+  }
+
+  Widget _fadeChrome(Widget child, {VoidCallback? onEnd}) {
+    if (!_theme(context).useBoundedControlsOpacityLayers) return child;
+    return RepaintBoundary(
+      child: AnimatedOpacity(
+        curve: Curves.easeInOut,
+        opacity: visible ? 1.0 : 0.0,
+        duration: _theme(context).controlsTransitionDuration,
+        onEnd: onEnd,
+        child: child,
+      ),
+    );
+  }
+
+  // Keep only the fade wrappers mounted at zero opacity. Recreating them
+  // together with their contents would make the next show jump to opacity 1.
+  Widget _fadeMountedChrome(Widget Function() buildChild, {VoidCallback? onEnd}) {
+    return _fadeChrome(
+      mount ? buildChild() : const SizedBox.shrink(),
+      onEnd: onEnd,
+    );
+  }
+
   void onTap() {
     if (!visible) {
       setState(() {
@@ -1002,28 +1054,21 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
                     }),
                   ),
                 // Controls:
-                AnimatedOpacity(
-                  curve: Curves.easeInOut,
-                  opacity: visible ? 1.0 : 0.0,
-                  duration: _theme(context).controlsTransitionDuration,
-                  onEnd: () {
-                    setState(() {
-                      if (!visible) {
-                        mount = false;
-                      }
-                    });
-                  },
+                _controlsTransition(
                   child: Stack(
                     clipBehavior: Clip.none,
                     alignment: Alignment.center,
                     children: [
-                      Positioned.fill(
-                        child: IgnorePointer(
-                          ignoring: _theme(context).gestureBuilder != null,
-                          child:
+                      if (!_theme(context).useBoundedControlsOpacityLayers ||
+                          (_theme(context).backdropColor?.a ?? 0) > 0)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            ignoring: _theme(context).gestureBuilder != null,
+                            child: _fadeChrome(
                               Container(color: _theme(context).backdropColor),
+                            ),
+                          ),
                         ),
-                      ),
                       // We are adding 16.0 boundary around the actual controls (which contain the vertical drag gesture detectors).
                       // This will make the hit-test on edges (e.g. swiping to: show status-bar, show navigation-bar, go back in navigation) not activate the swipe gesture annoyingly.
                       if (_theme(context).gestureBuilder == null)
@@ -1122,7 +1167,8 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
                             ),
                           ),
                         ),
-                      if (mount)
+                      if (mount ||
+                          _theme(context).useBoundedControlsOpacityLayers)
                         Padding(
                           padding: _theme(context).padding ??
                               (
@@ -1135,71 +1181,84 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
                             mainAxisAlignment: MainAxisAlignment.start,
                             crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
-                              Container(
-                                height: _theme(context).buttonBarHeight,
-                                margin: _theme(context).topButtonBarMargin,
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.max,
-                                  mainAxisAlignment: MainAxisAlignment.start,
-                                  crossAxisAlignment: CrossAxisAlignment.center,
-                                  children: _theme(context).topButtonBar,
+                              _fadeMountedChrome(
+                                () => Container(
+                                  height: _theme(context).buttonBarHeight,
+                                  margin: _theme(context).topButtonBarMargin,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.max,
+                                    mainAxisAlignment: MainAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
+                                    children: _theme(context).topButtonBar,
+                                  ),
                                 ),
+                                onEnd: _onControlsTransitionEnd,
                               ),
                               // Only display [primaryButtonBar] if [buffering] is false.
                               Expanded(
-                                child: AnimatedOpacity(
-                                  curve: Curves.easeInOut,
-                                  opacity: buffering ? 0.0 : 1.0,
-                                  duration: _theme(context)
-                                      .controlsTransitionDuration,
-                                  child: Center(
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.center,
-                                      children:
-                                          _theme(context).primaryButtonBar,
+                                child: Center(
+                                  child: _fadeMountedChrome(
+                                    () => AnimatedOpacity(
+                                      curve: Curves.easeInOut,
+                                      opacity: buffering ? 0.0 : 1.0,
+                                      duration: _theme(context)
+                                          .controlsTransitionDuration,
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.center,
+                                        children:
+                                            _theme(context).primaryButtonBar,
+                                      ),
                                     ),
                                   ),
                                 ),
                               ),
-                              Stack(
-                                alignment: Alignment.bottomCenter,
-                                children: [
-                                  if (_theme(context).displaySeekBar)
-                                    MaterialSeekBar(
-                                      onSeekStart: () {
-                                        _timer?.cancel();
-                                      },
-                                      onSeekEnd: _restartHideTimer,
+                              _fadeMountedChrome(
+                                () => Stack(
+                                  alignment: Alignment.bottomCenter,
+                                  children: [
+                                    if (_theme(context).displaySeekBar)
+                                      MaterialSeekBar(
+                                        onSeekStart: () {
+                                          _timer?.cancel();
+                                        },
+                                        onSeekEnd: _restartHideTimer,
+                                      ),
+                                    Container(
+                                      height: _theme(context).buttonBarHeight,
+                                      margin:
+                                          _theme(context).bottomButtonBarMargin,
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.max,
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.start,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.center,
+                                        children:
+                                            _theme(context).bottomButtonBar,
+                                      ),
                                     ),
-                                  Container(
-                                    height: _theme(context).buttonBarHeight,
-                                    margin:
-                                        _theme(context).bottomButtonBarMargin,
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.max,
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.start,
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.center,
-                                      children: _theme(context).bottomButtonBar,
-                                    ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ],
                           ),
                         ),
-                      if (_theme(context).centerOverlay != null)
+                      if (_theme(context).centerOverlay != null ||
+                          _theme(context).centerOverlayBuilder != null)
                         IgnorePointer(
                           ignoring: !visible,
                           child: ExcludeSemantics(
                             excluding: !visible,
                             child: Center(
-                              child: _theme(context).centerOverlay,
+                              child: _theme(context)
+                                      .centerOverlayBuilder
+                                      ?.call(context, visible) ??
+                                  _fadeChrome(_theme(context).centerOverlay!),
                             ),
                           ),
                         ),
