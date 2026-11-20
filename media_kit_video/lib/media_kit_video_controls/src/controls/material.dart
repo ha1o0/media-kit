@@ -211,6 +211,12 @@ class MaterialVideoControlsThemeData {
   /// Uses the full video bounds, independent of the controls' safe-area padding.
   final Widget? hiddenControlsOverlay;
 
+  /// Timeline target while dragging, or null when the interaction finishes.
+  final ValueChanged<Duration?>? onSeekPreviewChanged;
+
+  /// Preview scrubbing locally and commit the target only on pointer release.
+  final bool seekOnRelease;
+
   /// Replaces only the gesture area underneath the controls. The builder stays
   /// visible when controls fade and is reused by the fullscreen surface.
   final Widget Function(BuildContext, VoidCallback, VoidCallback)?
@@ -370,6 +376,8 @@ class MaterialVideoControlsThemeData {
     this.bufferingIndicatorBuilder,
     this.centerOverlay,
     this.hiddenControlsOverlay,
+    this.onSeekPreviewChanged,
+    this.seekOnRelease = false,
     this.gestureBuilder,
     this.volumeIndicatorBuilder,
     this.brightnessIndicatorBuilder,
@@ -455,6 +463,8 @@ class MaterialVideoControlsThemeData {
     Widget Function(BuildContext)? bufferingIndicatorBuilder,
     Widget? centerOverlay,
     Widget? hiddenControlsOverlay,
+    ValueChanged<Duration?>? onSeekPreviewChanged,
+    bool? seekOnRelease,
     Widget Function(BuildContext, VoidCallback, VoidCallback)? gestureBuilder,
     Widget Function(BuildContext, double)? volumeIndicatorBuilder,
     Widget Function(BuildContext, double)? brightnessIndicatorBuilder,
@@ -537,6 +547,8 @@ class MaterialVideoControlsThemeData {
           bufferingIndicatorBuilder ?? this.bufferingIndicatorBuilder,
       centerOverlay: centerOverlay ?? this.centerOverlay,
       hiddenControlsOverlay: hiddenControlsOverlay ?? this.hiddenControlsOverlay,
+      onSeekPreviewChanged: onSeekPreviewChanged ?? this.onSeekPreviewChanged,
+      seekOnRelease: seekOnRelease ?? this.seekOnRelease,
       gestureBuilder: gestureBuilder ?? this.gestureBuilder,
       volumeIndicatorBuilder:
           volumeIndicatorBuilder ?? this.volumeIndicatorBuilder,
@@ -1790,7 +1802,10 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
       tapped = true;
       slider = percent.clamp(0.0, 1.0);
     });
-    controller(context).player.seek(duration * slider);
+    _theme(context).onSeekPreviewChanged?.call(duration * slider);
+    if (!_theme(context).seekOnRelease) {
+      controller(context).player.seek(duration * slider);
+    }
   }
 
   void onPointerDown() {
@@ -1801,6 +1816,8 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
   }
 
   void onPointerUp() {
+    if (!tapped) return;
+    _theme(context).onSeekPreviewChanged?.call(null);
     widget.onSeekEnd?.call();
     setState(() {
       // Explicitly set the position to prevent the slider from jumping.
@@ -1816,6 +1833,7 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
       tapped = true;
       slider = percent.clamp(0.0, 1.0);
     });
+    _theme(context).onSeekPreviewChanged?.call(duration * slider);
   }
 
   void onPanDown(DragDownDetails e, BoxConstraints constraints) {
@@ -1824,6 +1842,7 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
       tapped = true;
       slider = percent.clamp(0.0, 1.0);
     });
+    _theme(context).onSeekPreviewChanged?.call(duration * slider);
   }
 
   void onPanUpdate(DragUpdateDetails e, BoxConstraints constraints) {
@@ -1832,6 +1851,7 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
       tapped = true;
       slider = percent.clamp(0.0, 1.0);
     });
+    _theme(context).onSeekPreviewChanged?.call(duration * slider);
   }
 
   /// Returns the current playback position in percentage.
@@ -1868,6 +1888,11 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
               onPointerMove: (e) => onPointerMove(e, constraints),
               onPointerDown: (e) => onPointerDown(),
               onPointerUp: (e) => onPointerUp(),
+              onPointerCancel: (_) {
+                _theme(context).onSeekPreviewChanged?.call(null);
+                widget.onSeekEnd?.call();
+                setState(() => tapped = false);
+              },
               child: Container(
                 color: Colors.transparent,
                 width: constraints.maxWidth,
