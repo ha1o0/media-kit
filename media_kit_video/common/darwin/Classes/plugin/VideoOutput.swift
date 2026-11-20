@@ -158,8 +158,19 @@ public class VideoOutput: NSObject {
 
   public func setSize(width: Int64?, height: Int64?) {
     worker.enqueue {
+      #if os(iOS)
+        let changed = self.width != width || self.height != height
+      #endif
       self.width = width
       self.height = height
+      #if os(iOS)
+        // A paused video has no next frame callback. Render the retained frame
+        // after an IOSurface size change; _updateCallback keeps background/PiP
+        // on its existing non-GPU path and checks disposal before rendering.
+        if changed, self.texture is TextureIOSurface {
+          self._updateCallback()
+        }
+      #endif
     }
   }
 
