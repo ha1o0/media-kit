@@ -1034,12 +1034,14 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
                     !mount &&
                     _theme(context).hiddenControlsOverlay != null)
                   Positioned.fill(
+                    key: const ValueKey('material-hidden-controls-overlay'),
                     child: IgnorePointer(
                       child: _theme(context).hiddenControlsOverlay!,
                     ),
                   ),
                 if (_theme(context).gestureBuilder != null)
                   Positioned.fill(
+                    key: const ValueKey('material-playback-gesture-surface'),
                     left: 16.0,
                     top: 16.0,
                     right: 16.0,
