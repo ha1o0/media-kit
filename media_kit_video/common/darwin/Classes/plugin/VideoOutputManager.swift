@@ -28,7 +28,7 @@ public class VideoOutputManager: NSObject {
   }
 
   #if os(iOS)
-    public func attachHdrView(textureId: Int64, view: HDRMetalVideoPlatformView) {
+    func attachHdrView(textureId: Int64, view: HDRMetalVideoPlatformView) {
       videoOutputs.values.first(where: { $0.matchesTextureId(textureId) })?.attachHdrView(view)
     }
   #endif

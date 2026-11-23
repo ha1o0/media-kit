@@ -43,7 +43,7 @@ final class HDRMetalSurfaceView: UIView {
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   func display(_ pixelBuffer: CVPixelBuffer, colorSpace: Int32) {
-    guard let surface = CVPixelBufferGetIOSurface(pixelBuffer),
+    guard let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue(),
       let drawable = metalLayer.nextDrawable() else { return }
     let width = IOSurfaceGetWidth(surface)
     let height = IOSurfaceGetHeight(surface)
@@ -53,7 +53,7 @@ final class HDRMetalSurfaceView: UIView {
       height: height,
       mipmapped: false
     )
-    descriptor.usage = [.shaderRead, .shaderWrite]
+    descriptor.usage = MTLTextureUsage.shaderRead.union(.shaderWrite)
     guard let source = device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0),
       let commandBuffer = queue.makeCommandBuffer(),
       let blit = commandBuffer.makeBlitCommandEncoder() else { return }

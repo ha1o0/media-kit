@@ -201,9 +201,9 @@ public class VideoOutput: NSObject {
   }
 
   #if os(iOS)
-    public func matchesTextureId(_ id: Int64) -> Bool { textureId == id }
+    func matchesTextureId(_ id: Int64) -> Bool { textureId == id }
 
-    public func attachHdrView(_ view: HDRMetalVideoPlatformView) {
+    func attachHdrView(_ view: HDRMetalVideoPlatformView) {
       hdrPlatformView = view
     }
   #endif
