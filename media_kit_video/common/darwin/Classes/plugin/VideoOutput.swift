@@ -67,6 +67,7 @@ public class VideoOutput: NSObject {
     private var pipRendering = false
     private var pipFrameDelivery = false
     private var lastPipPreviewFrame = 0.0
+    private weak var hdrPlatformView: HDRMetalVideoPlatformView?
   #endif
 
   init(
@@ -191,6 +192,22 @@ public class VideoOutput: NSObject {
     return true
   }
 
+  private var usesHdrSurface: Bool {
+    #if os(iOS)
+      return renderBackend == "iosurface-hdr"
+    #else
+      return false
+    #endif
+  }
+
+  #if os(iOS)
+    public func matchesTextureId(_ id: Int64) -> Bool { textureId == id }
+
+    public func attachHdrView(_ view: HDRMetalVideoPlatformView) {
+      hdrPlatformView = view
+    }
+  #endif
+
   private func _init() {
     createTexture(hardware: enableHardwareAcceleration)
   }
@@ -199,12 +216,13 @@ public class VideoOutput: NSObject {
     // A request for the new backend may still be paired with the old locked
     // libmpv. Fall back without requiring a different app or player session.
     #if os(iOS)
-      let wantsIosSurface = renderBackend == "iosurface" || renderBackend == "iosurface+decoded-pip"
+      let wantsIosSurface = renderBackend == "iosurface" ||
+        renderBackend == "iosurface+decoded-pip" || usesHdrSurface
       if requestedHardwareAcceleration, wantsIosSurface,
-        let metal = TextureIOSurface(handle: handle, updateCallback: { [weak self] in
+        let metal = TextureIOSurface(handle: handle, hdrOutput: usesHdrSurface, updateCallback: { [weak self] in
           self?.updateCallback()
         }) {
-        NSLog("VideoOutput: using gpu-next / Vulkan / MoltenVK IOSurface")
+        NSLog("VideoOutput: using gpu-next / Vulkan / MoltenVK IOSurface%@", usesHdrSurface ? " with EDR" : "")
         hasUsedIosSurface = true
         releasePictureInPictureRenderContext = { [weak metal] in metal?.releaseRenderContext() }
         texture = metal
@@ -401,14 +419,22 @@ public class VideoOutput: NSObject {
       let firstAfterHandoff = pipHandoff.needsDecodedFrame
       pipHandoff.didPublishFrame()
       displayedSize = logicalSize
-      inlineTexture.publish(frame)
-      deliverPictureInPictureFrame(handoff: firstAfterHandoff && pipPolicy.presenting)
+      if usesHdrSurface {
+        let view = hdrPlatformView
+        let colorSpace = texture.currentColorSpace
+        if let view = view {
+          DispatchQueue.main.async { view.surfaceView.display(frame, colorSpace: colorSpace) }
+        }
+      } else {
+        inlineTexture.publish(frame)
+        deliverPictureInPictureFrame(handoff: firstAfterHandoff && pipPolicy.presenting)
+      }
       if let start = pipHandoffStartedAt {
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
         NSLog("VideoOutput: PiP first decoded replacement in %.1f ms", elapsed)
         pipHandoffStartedAt = nil
       }
-      notifyInlineFrameIfActive()
+      if !usesHdrSurface { notifyInlineFrameIfActive() }
     #else
       texture.render(size)
       DispatchQueue.main.sync { [weak self] in

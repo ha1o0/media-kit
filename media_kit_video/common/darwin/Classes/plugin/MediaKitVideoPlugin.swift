@@ -28,6 +28,14 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       utils: utils
     )
     registrar.addMethodCallDelegate(instance, channel: channel)
+    #if os(iOS)
+      registrar.register(
+        HDRMetalVideoPlatformViewFactory { textureId, view in
+          instance.videoOutputManager.attachHdrView(textureId: textureId, view: view)
+        },
+        withId: "media_kit_video/hdr"
+      )
+    #endif
   }
 
   private let channel: FlutterMethodChannel

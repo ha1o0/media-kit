@@ -11,6 +11,9 @@ import IOSurface
 /// still receive the same BGRA CVPixelBuffer contract as the other textures.
 final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private let updateCallback: () -> Void
+  private let mpvHandle: OpaquePointer
+  private let hdrOutput: Bool
+  private(set) var currentColorSpace: Int32 = Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR)
   private let frameLock = NSLock()
   private var currentFrame: CVPixelBuffer?
   private var pipPool: CVPixelBufferPool?
@@ -23,7 +26,9 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private var reportedRenderFailure = false
   private var reportedAllocationFailure = false
 
-  init?(handle: OpaquePointer, updateCallback: @escaping () -> Void) {
+  init?(handle: OpaquePointer, hdrOutput: Bool = false, updateCallback: @escaping () -> Void) {
+    self.mpvHandle = handle
+    self.hdrOutput = hdrOutput
     self.updateCallback = updateCallback
     super.init()
 
@@ -183,7 +188,9 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
     let attributes: [CFString: Any] = [
       kCVPixelBufferWidthKey: Int(size.width),
       kCVPixelBufferHeightKey: Int(size.height),
-      kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+      kCVPixelBufferPixelFormatTypeKey: hdrOutput
+        ? kCVPixelFormatType_64RGBAHalf
+        : kCVPixelFormatType_32BGRA,
       kCVPixelBufferIOSurfacePropertiesKey: [:],
       kCVPixelBufferMetalCompatibilityKey: true,
     ]
@@ -195,6 +202,23 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
 
   func render(_ size: CGSize) {
     _ = renderVideoFrame(size, needsDecodedFrame: false)
+  }
+
+  private func outputColorSpace() -> Int32 {
+    guard hdrOutput else { return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR) }
+    func property(_ name: String) -> String? {
+      guard let value = mpv_get_property_string(mpvHandle, name) else { return nil }
+      defer { mpv_free(value) }
+      return String(cString: value)
+    }
+    let gamma = property("video-out-params/gamma")?.lowercased()
+    if gamma == "hlg" || gamma == "arib-std-b67" {
+      return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HLG)
+    }
+    if gamma == "pq" || gamma == "st2084" || gamma == "st-2084" {
+      return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HDR10)
+    }
+    return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR)
   }
 
   func renderVideoFrame(_ size: CGSize, needsDecodedFrame: Bool) -> Bool {
@@ -213,11 +237,17 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
       return false
     }
 
-    var params = [
-      mpv_render_param(type: mpv_render_param_type(rawValue: 24), data: surface.toOpaque()),
-      mpv_render_param(),
-    ]
-    let status = mpv_render_context_render(renderContext, &params)
+    var colorSpace = outputColorSpace()
+    currentColorSpace = colorSpace
+    let status = withUnsafeMutablePointer(to: &colorSpace) { colorSpacePointer in
+      var params = [
+        mpv_render_param(type: MPV_RENDER_PARAM_IOSURFACE, data: surface.toOpaque()),
+        mpv_render_param(type: MPV_RENDER_PARAM_IOSURFACE_COLOR_SPACE,
+                         data: UnsafeMutableRawPointer(colorSpacePointer)),
+        mpv_render_param(),
+      ]
+      return mpv_render_context_render(renderContext, &params)
+    }
     guard status >= 0 else {
       if !reportedRenderFailure {
         reportedRenderFailure = true

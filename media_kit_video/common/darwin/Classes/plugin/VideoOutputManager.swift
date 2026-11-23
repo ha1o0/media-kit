@@ -27,6 +27,12 @@ public class VideoOutputManager: NSObject {
     self.videoOutputs[handle] = videoOutput
   }
 
+  #if os(iOS)
+    public func attachHdrView(textureId: Int64, view: HDRMetalVideoPlatformView) {
+      videoOutputs.values.first(where: { $0.matchesTextureId(textureId) })?.attachHdrView(view)
+    }
+  #endif
+
   public func setSize(
     handle: Int64,
     width: Int64?,
