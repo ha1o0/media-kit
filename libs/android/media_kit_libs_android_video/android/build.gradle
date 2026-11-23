@@ -48,11 +48,13 @@ android {
 }
 
 task downloadDependencies(type: Exec) {   
-        // Local codec iterations can use a separately verified ARM64 bundle.
-        // Keep release downloads and the other ABIs at their pinned defaults.
+        // Local native builds stay separate from the published dependency pins.
         def localArm64Path = System.getenv("BOTA_ANDROID_LIBMPV_ARM64_JAR")
         def localArm64SHA256 = System.getenv("BOTA_ANDROID_LIBMPV_ARM64_SHA256")
         def localArm64File = null
+        def localJarSHA256 = { candidate ->
+            MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(candidate.toPath())).encodeHex().toString()
+        }
         if (localArm64Path || localArm64SHA256) {
             if (!localArm64Path || !localArm64SHA256 || !(localArm64SHA256 ==~ /[a-fA-F0-9]{64}/)) {
                 throw new GradleException("A local ARM64 libmpv JAR requires its SHA-256 checksum")
@@ -61,10 +63,42 @@ task downloadDependencies(type: Exec) {
             if (!localArm64File.isFile()) {
                 throw new GradleException("Local ARM64 libmpv JAR does not exist: ${localArm64File}")
             }
-            def digest = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(localArm64File.toPath())).encodeHex().toString()
+            def digest = localJarSHA256(localArm64File)
             if (digest != localArm64SHA256.toLowerCase()) {
                 // Never delete a caller's local artifact on failed validation.
                 throw new GradleException("SHA-256 verification failed for local ARM64 libmpv JAR")
+            }
+        }
+        def localBundlePath = System.getenv("BOTA_ANDROID_LIBMPV_DIRECTORY")
+        def localBundleDir = localBundlePath == null ? file("local_libmpv") :
+                (localBundlePath.isEmpty() ? null : file(localBundlePath))
+        def localBundleFiles = [:]
+        if (localBundleDir != null && (localBundleDir.exists() || localBundlePath)) {
+            if (!localBundleDir.isDirectory()) {
+                throw new GradleException("Local libmpv bundle directory does not exist: ${localBundleDir}")
+            }
+            def checksumsFile = new File(localBundleDir, "SHA256SUMS")
+            if (!checksumsFile.isFile()) {
+                throw new GradleException("A local libmpv bundle requires SHA256SUMS")
+            }
+            def digests = [:]
+            checksumsFile.readLines("UTF-8").findAll { !it.trim().isEmpty() }.each { line ->
+                def entry = line.trim() =~ /^([a-fA-F0-9]{64})\s+\*?(default-(?:arm64-v8a|armeabi-v7a|x86_64|x86)\.jar)$/
+                if (!entry.matches() || digests.containsKey(entry[0][2])) {
+                    throw new GradleException("Invalid or duplicate local libmpv checksum entry")
+                }
+                digests[entry[0][2]] = entry[0][1].toLowerCase()
+            }
+            def bundleNames = ["default-arm64-v8a.jar", "default-armeabi-v7a.jar", "default-x86_64.jar", "default-x86.jar"]
+            if (digests.keySet() != bundleNames.toSet()) {
+                throw new GradleException("A local libmpv bundle must include all four Android ABIs")
+            }
+            bundleNames.each { name ->
+                def candidate = new File(localBundleDir, name)
+                if (!candidate.isFile() || localJarSHA256(candidate) != digests[name]) {
+                    throw new GradleException("SHA-256 verification failed for local libmpv bundle: ${name}")
+                }
+                localBundleFiles[name] = candidate
             }
         }
         // Delete previously created /output subdirectory.
@@ -84,8 +118,10 @@ task downloadDependencies(type: Exec) {
         ]
 
         filesToDownload.each { fileInfo ->
-            def useLocal = localArm64File != null && fileInfo.destination.name == "default-arm64-v8a.jar"
-            def destFile = useLocal ? localArm64File : fileInfo.destination
+            def localFile = localArm64File != null && fileInfo.destination.name == "default-arm64-v8a.jar" ?
+                    localArm64File : localBundleFiles[fileInfo.destination.name]
+            def useLocal = localFile != null
+            def destFile = useLocal ? localFile : fileInfo.destination
             if (!useLocal && destFile.exists()) {
                 def calculatedSHA256 = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(destFile.toPath())).encodeHex().toString()
 
