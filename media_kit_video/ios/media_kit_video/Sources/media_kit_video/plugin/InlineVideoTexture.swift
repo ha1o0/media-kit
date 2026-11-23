@@ -26,6 +26,10 @@ final class InlineVideoTexture: NSObject, FlutterTexture {
   }
 
   func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
-    latestFrame.map { Unmanaged.passRetained($0) }
+    // Flutter can request one final raster frame while switching to UIKit.
+    // Never hand its 8-bit texture contract the native HDR target.
+    guard let frame = latestFrame,
+      CVPixelBufferGetPixelFormatType(frame) == kCVPixelFormatType_32BGRA else { return nil }
+    return Unmanaged.passRetained(frame)
   }
 }

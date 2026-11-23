@@ -13,7 +13,10 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private let updateCallback: () -> Void
   private let mpvHandle: OpaquePointer
   private let hdrOutput: Bool
+  var potentialHdrHeadroom: Double = 1
   private(set) var currentColorSpace: Int32 = Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR.rawValue)
+  private(set) var hdrMaxLuminance: Float = 1000
+  private(set) var hdrMinLuminance: Float = 0.0001
   private let frameLock = NSLock()
   private var currentFrame: CVPixelBuffer?
   private var pipPool: CVPixelBufferPool?
@@ -21,6 +24,7 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private var sameContextPipSupport: Bool?
   private var pool: CVPixelBufferPool?
   private var poolSize: CGSize = .zero
+  private var poolUsesHdr = false
   private var nextAllocation = DispatchTime(uptimeNanoseconds: 0)
   private var renderContext: OpaquePointer?
   private var reportedRenderFailure = false
@@ -188,8 +192,8 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
     let attributes: [CFString: Any] = [
       kCVPixelBufferWidthKey: Int(size.width),
       kCVPixelBufferHeightKey: Int(size.height),
-      kCVPixelBufferPixelFormatTypeKey: hdrOutput
-        ? kCVPixelFormatType_64RGBAHalf
+      kCVPixelBufferPixelFormatTypeKey: poolUsesHdr
+        ? kCVPixelFormatType_ARGB2101010LEPacked
         : kCVPixelFormatType_32BGRA,
       kCVPixelBufferIOSurfacePropertiesKey: [:],
       kCVPixelBufferMetalCompatibilityKey: true,
@@ -205,25 +209,39 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   }
 
   private func outputColorSpace() -> Int32 {
-    guard hdrOutput else { return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR.rawValue) }
+    guard hdrOutput, potentialHdrHeadroom > 1 else { return 0 }
     func property(_ name: String) -> String? {
       guard let value = mpv_get_property_string(mpvHandle, name) else { return nil }
       defer { mpv_free(value) }
       return String(cString: value)
     }
-    let gamma = property("video-out-params/gamma")?.lowercased()
-    if gamma == "hlg" || gamma == "arib-std-b67" {
-      return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HLG.rawValue)
-    }
-    if gamma == "pq" || gamma == "st2084" || gamma == "st-2084" {
-      return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HDR10.rawValue)
-    }
-    return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR.rawValue)
+    let transfer = property("video-out-params/gamma")?.lowercased()
+    guard ["pq", "st2084", "st-2084", "hlg", "arib-std-b67"].contains(transfer ?? "") else { return 0 }
+    return IOSHdrOutputPolicy.colorSpace(enabled: hdrOutput,
+      potentialHeadroom: potentialHdrHeadroom,
+      hint: property("target-colorspace-hint"),
+      transfer: transfer,
+      primaries: property("video-out-params/primaries")?.lowercased())
   }
 
   func renderVideoFrame(_ size: CGSize, needsDecodedFrame: Bool) -> Bool {
     guard let renderContext = renderContext,
       !needsDecodedFrame || MPVHelpers.prepareDecodedPictureInPictureFrame(renderContext) else { return false }
+    var colorSpace = outputColorSpace()
+    let usesHdr = colorSpace != 0
+    if usesHdr {
+      var peak = 0.0, minimum = 0.0
+      if mpv_get_property(mpvHandle, "video-out-params/max-luma", MPV_FORMAT_DOUBLE, &peak) >= 0,
+        peak > 0, peak <= 10000 { hdrMaxLuminance = Float(peak) }
+      else { hdrMaxLuminance = 1000 }
+      if mpv_get_property(mpvHandle, "video-out-params/min-luma", MPV_FORMAT_DOUBLE, &minimum) >= 0,
+        minimum >= 0, minimum < Double(hdrMaxLuminance) { hdrMinLuminance = Float(minimum) }
+      else { hdrMinLuminance = 0.0001 }
+    }
+    if poolUsesHdr != usesHdr {
+      poolUsesHdr = usesHdr
+      replacePool(poolSize)
+    }
     guard let frame = allocateFrame(), let surface = CVPixelBufferGetIOSurface(frame) else {
       // Still consume the pending mpv frame; otherwise the VO waits for us.
       var skip: Int32 = 1
@@ -237,8 +255,6 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
       return false
     }
 
-    var colorSpace = outputColorSpace()
-    currentColorSpace = colorSpace
     let status = withUnsafeMutablePointer(to: &colorSpace) { colorSpacePointer in
       var params = [
         mpv_render_param(type: MPV_RENDER_PARAM_IOSURFACE, data: surface.toOpaque()),
@@ -258,6 +274,7 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
 
     frameLock.lock()
     currentFrame = frame
+    currentColorSpace = colorSpace
     frameLock.unlock()
     return true
   }

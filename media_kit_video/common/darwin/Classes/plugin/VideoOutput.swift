@@ -19,7 +19,7 @@ import Foundation
 // dedicated thread.
 public class VideoOutput: NSObject {
   // Will be called on the main thread
-  public typealias TextureUpdateCallback = (Int64, CGSize) -> Void
+  public typealias TextureUpdateCallback = (Int64, CGSize, Bool) -> Void
 
   private static let isSimulator: Bool = {
     let isSim: Bool
@@ -67,7 +67,17 @@ public class VideoOutput: NSObject {
     private var pipRendering = false
     private var pipFrameDelivery = false
     private var lastPipPreviewFrame = 0.0
-    private weak var hdrPlatformView: HDRMetalVideoPlatformView?
+    // Platform views can overlap while entering/leaving fullscreen. Keep all
+    // live views, and replay the last frame when a paused view is attached.
+    // These presentation fields are only accessed on the main thread.
+    private let hdrPlatformViews = NSHashTable<HDRMetalVideoPlatformView>.weakObjects()
+    private var hdrPlatformViewOrder: [ObjectIdentifier] = []
+    private var hdrFrame: (pixel: CVPixelBuffer, colorSpace: Int32, minLuminance: Float, maxLuminance: Float)?
+    private var lastInlineHdrActive = false
+    private var potentialHdrHeadroom: Double = 1
+    // Opt-in device diagnostics; no per-frame clock reads in ordinary builds.
+    private let measuresRenderTime = ProcessInfo.processInfo.environment["BOTA_IOS_RENDER_PROBE"] == "1"
+    private var renderTimes: [Double] = []
   #endif
 
   init(
@@ -90,6 +100,9 @@ public class VideoOutput: NSObject {
     super.init()
 
     #if os(iOS)
+      if #available(iOS 16.0, *) {
+        potentialHdrHeadroom = Double(UIScreen.main.potentialEDRHeadroom)
+      }
       pipObserver = NotificationCenter.default.addObserver(
         forName: Notification.Name("bota.mobile-pip-rendering"), object: nil, queue: .main
       ) { [weak self] event in
@@ -121,10 +134,16 @@ public class VideoOutput: NSObject {
           forName: name, object: nil, queue: .main
         ) { [weak self] _ in
           self?.appActivity.isActive = active
+          let headroom: Double
+          if #available(iOS 16.0, *) {
+            headroom = Double(UIScreen.main.potentialEDRHeadroom)
+          } else { headroom = 1 }
           self?.worker.enqueue { [weak self] in
             guard let self = self, !self.disposed else { return }
             let currentActivity = self.appActivity.isActive
             self.pipPolicy.appIsActive = currentActivity
+            self.potentialHdrHeadroom = headroom
+            (self.texture as? TextureIOSurface)?.potentialHdrHeadroom = headroom
             let wasDraining = self.drainsPictureInPictureFrames
             if currentActivity { self.drainsPictureInPictureFrames = false }
             self.updatePictureInPictureRenderer()
@@ -203,8 +222,50 @@ public class VideoOutput: NSObject {
   #if os(iOS)
     func matchesTextureId(_ id: Int64) -> Bool { textureId == id }
 
+    var hdrState: [String: Any] {
+      var headroom = 1.0
+      if #available(iOS 16.0, *) { headroom = Double(UIScreen.main.potentialEDRHeadroom) }
+      return ["requested": usesHdrSurface, "available": usesHdrSurface && headroom > 1,
+              "active": lastInlineHdrActive, "potentialHeadroom": headroom,
+              "colorSpace": hdrFrame?.colorSpace ?? 0]
+    }
+
+    func renderStats(reset: Bool, completion: @escaping ([String: Any]) -> Void) {
+      let presentation = hdrPlatformViews.allObjects.first(where: {
+        ObjectIdentifier($0) == hdrPlatformViewOrder.last
+      })?.surfaceView.renderStats(reset: reset) ?? [:]
+      worker.enqueue { [weak self] in
+        guard let self = self else { return }
+        var stats = IOSRenderTiming.summary(self.renderTimes)
+        stats["pixelFormat"] = self.inlineTexture.latestFrame.map { CVPixelBufferGetPixelFormatType($0) } ?? 0
+        stats["presentation"] = presentation
+        if reset { self.renderTimes.removeAll(keepingCapacity: true) }
+        DispatchQueue.main.async { completion(stats) }
+      }
+    }
+
     func attachHdrView(_ view: HDRMetalVideoPlatformView) {
-      hdrPlatformView = view
+      hdrPlatformViews.add(view)
+      let identity = ObjectIdentifier(view)
+      hdrPlatformViewOrder.append(identity)
+      view.onDispose = { [weak self] in
+        self?.hdrPlatformViewOrder.removeAll { $0 == identity }
+        self?.displayHdrFrame()
+      }
+      displayHdrFrame()
+    }
+
+    private func displayHdrFrame() {
+      let views = hdrPlatformViews.allObjects
+      hdrPlatformViewOrder.removeAll { id in !views.contains { ObjectIdentifier($0) == id } }
+      // Fullscreen owns presentation while its view is alive. Do not blit the
+      // same HDR frame twice to the covered inline view on every callback.
+      guard let identity = hdrPlatformViewOrder.last,
+        let view = views.first(where: { ObjectIdentifier($0) == identity }) else { return }
+      if let frame = hdrFrame {
+        view.surfaceView.display(frame.pixel, colorSpace: frame.colorSpace,
+          minLuminance: frame.minLuminance, maxLuminance: frame.maxLuminance)
+      }
     }
   #endif
 
@@ -223,6 +284,7 @@ public class VideoOutput: NSObject {
           self?.updateCallback()
         }) {
         NSLog("VideoOutput: using gpu-next / Vulkan / MoltenVK IOSurface%@", usesHdrSurface ? " with EDR" : "")
+        metal.potentialHdrHeadroom = potentialHdrHeadroom
         hasUsedIosSurface = true
         releasePictureInPictureRenderContext = { [weak metal] in metal?.releaseRenderContext() }
         texture = metal
@@ -280,7 +342,7 @@ public class VideoOutput: NSObject {
       // AVKit's automatic-start callback may follow willResignActive. Drain
       // the same decoder as soon as system frames are armed; never briefly
       // submit GPU work while waiting for the PiP delegate in the background.
-      if renderBackend == "iosurface+decoded-pip", !sameContextPictureInPictureFailed,
+      if (renderBackend == "iosurface+decoded-pip" || usesHdrSurface), !sameContextPictureInPictureFailed,
         let renderer = texture as? TextureIOSurface,
         pipPolicy.usesSameDecoder(framesArmed: pipFrameDelivery,
           supported: renderer.supportsSameContextPictureInPicture, currentlyDraining: drainsPictureInPictureFrames) {
@@ -334,7 +396,7 @@ public class VideoOutput: NSObject {
       textureId = registry.register(texture)
     #endif
     // textureUpdateCallback must run on the main thread
-    textureUpdateCallback(textureId, CGSize(width: 0, height: 0))
+    textureUpdateCallback(textureId, CGSize(width: 0, height: 0), false)
   }
 
   private func disposeTextureId() {
@@ -404,7 +466,7 @@ public class VideoOutput: NSObject {
         DispatchQueue.main.sync { [weak self] in
           guard let that = self else { return }
           // textureUpdateCallback must run on the main thread
-          that.textureUpdateCallback(that.textureId, size)
+          that.textureUpdateCallback(that.textureId, size, false)
         }
       #endif
     }
@@ -414,27 +476,25 @@ public class VideoOutput: NSObject {
     }
 
     #if os(iOS)
+      let renderStart = measuresRenderTime ? CFAbsoluteTimeGetCurrent() : 0
       guard texture.renderVideoFrame(size, needsDecodedFrame: pipHandoff.needsDecodedFrame),
         let frame = texture.copyPixelBuffer()?.takeRetainedValue() else { return }
+      if measuresRenderTime, renderTimes.count < 3600 {
+        renderTimes.append((CFAbsoluteTimeGetCurrent() - renderStart) * 1000)
+      }
       let firstAfterHandoff = pipHandoff.needsDecodedFrame
       pipHandoff.didPublishFrame()
       displayedSize = logicalSize
-      if usesHdrSurface {
-        let view = hdrPlatformView
-        let colorSpace = (texture as? TextureIOSurface)?.currentColorSpace ?? 0
-        if let view = view {
-          DispatchQueue.main.async { view.surfaceView.display(frame, colorSpace: colorSpace) }
-        }
-      } else {
-        inlineTexture.publish(frame)
-        deliverPictureInPictureFrame(handoff: firstAfterHandoff && pipPolicy.presenting)
-      }
+      inlineTexture.publish(frame)
+      deliverPictureInPictureFrame(handoff: firstAfterHandoff && pipPolicy.presenting)
       if let start = pipHandoffStartedAt {
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
         NSLog("VideoOutput: PiP first decoded replacement in %.1f ms", elapsed)
         pipHandoffStartedAt = nil
       }
-      if !usesHdrSurface { notifyInlineFrameIfActive() }
+      // The HDR platform view also needs Resize to leave the initial 0x0
+      // layout and complete waitUntilFirstFrameRendered on the Dart side.
+      notifyInlineFrameIfActive()
     #else
       texture.render(size)
       DispatchQueue.main.sync { [weak self] in
@@ -447,7 +507,7 @@ public class VideoOutput: NSObject {
 
   #if os(iOS)
     private func permitsDecodedPictureInPicture() -> Bool {
-      guard renderBackend == "iosurface+decoded-pip" else { return false }
+      guard renderBackend == "iosurface+decoded-pip" || usesHdrSurface else { return false }
       // A direct sample is before mpv's OSD and output transform.
       for property in ["sid", "secondary-sid"] {
         guard let selected = mpv_get_property_string(handle, property) else { return false }
@@ -524,14 +584,28 @@ public class VideoOutput: NSObject {
     private func notifyInlineFrameIfActive() {
       guard pipPolicy.appIsActive, displayedSize != .zero else { return }
       let size = displayedSize
+      let colorSpace = (texture as? TextureIOSurface)?.currentColorSpace ?? 0
+      let minimum = (texture as? TextureIOSurface)?.hdrMinLuminance ?? 0.0001
+      let peak = (texture as? TextureIOSurface)?.hdrMaxLuminance ?? 1000
+      let hdrActive = usesHdrSurface && colorSpace != 0
+      let frame = hdrActive ? inlineTexture.latestFrame : nil
       DispatchQueue.main.sync { [weak self] in
         guard let self = self, !self.disposed, self.textureId >= 0,
           UIApplication.shared.applicationState == .active else { return }
-        if self.lastInlineSize != size {
+        if self.lastInlineSize != size || self.lastInlineHdrActive != hdrActive {
           self.lastInlineSize = size
-          self.textureUpdateCallback(self.textureId, size)
+          self.lastInlineHdrActive = hdrActive
+          self.textureUpdateCallback(self.textureId, size, hdrActive)
         }
-        self.registry.textureFrameAvailable(self.textureId)
+        if hdrActive {
+          if let frame = frame {
+            self.hdrFrame = (frame, colorSpace, minimum, peak)
+            self.displayHdrFrame()
+          }
+        } else {
+          self.hdrFrame = nil
+          self.registry.textureFrameAvailable(self.textureId)
+        }
       }
     }
 

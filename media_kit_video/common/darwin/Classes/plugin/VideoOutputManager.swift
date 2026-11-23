@@ -28,6 +28,13 @@ public class VideoOutputManager: NSObject {
   }
 
   #if os(iOS)
+    func hdrState(handle: Int64) -> [String: Any]? { videoOutputs[handle]?.hdrState }
+
+    func renderStats(handle: Int64, reset: Bool, completion: @escaping ([String: Any]) -> Void) {
+      guard let output = videoOutputs[handle] else { completion([:]); return }
+      output.renderStats(reset: reset, completion: completion)
+    }
+
     func attachHdrView(textureId: Int64, view: HDRMetalVideoPlatformView) {
       videoOutputs.values.first(where: { $0.matchesTextureId(textureId) })?.attachHdrView(view)
     }

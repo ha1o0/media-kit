@@ -414,6 +414,8 @@ class NativeVideoController extends PlatformVideoController {
                       call.arguments['rect']['height'] * 1.0,
                     );
                     final int id = call.arguments['id'];
+                    _controllers[handle]?.nativeHdrActive.value =
+                        call.arguments['hdrActive'] == true;
                     _controllers[handle]?.rect.value = rect;
                     _controllers[handle]?.id.value = id;
                     // Notify about the first frame being rendered.

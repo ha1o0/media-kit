@@ -692,25 +692,34 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                                               children: [
                                                 const SizedBox(),
                                                 Positioned.fill(
-                                                  child: Platform.isIOS &&
-                                                          notifier.configuration
-                                                                  .renderBackend ==
-                                                              'iosurface-hdr'
-                                                      ? UiKitView(
-                                                          viewType:
-                                                              'media_kit_video/hdr',
-                                                          creationParams: {
-                                                            'textureId': id,
-                                                          },
-                                                          creationParamsCodec:
-                                                              const StandardMessageCodec(),
-                                                        )
-                                                      : Texture(
-                                                          textureId: id,
-                                                          filterQuality:
-                                                              videoViewParameters
-                                                                  .filterQuality,
-                                                        ),
+                                                  child: ValueListenableBuilder<
+                                                      bool>(
+                                                    valueListenable: notifier
+                                                        .nativeHdrActive,
+                                                    builder: (context,
+                                                            nativeHdrActive,
+                                                            _) =>
+                                                        Platform.isIOS &&
+                                                                nativeHdrActive
+                                                            ? UiKitView(
+                                                                key: ValueKey(
+                                                                    id),
+                                                                viewType:
+                                                                    'media_kit_video/hdr',
+                                                                creationParams: {
+                                                                  'textureId':
+                                                                      id,
+                                                                },
+                                                                creationParamsCodec:
+                                                                    const StandardMessageCodec(),
+                                                              )
+                                                            : Texture(
+                                                                textureId: id,
+                                                                filterQuality:
+                                                                    videoViewParameters
+                                                                        .filterQuality,
+                                                              ),
+                                                  ),
                                                 ),
                                                 // Keep the |Texture| hidden before the first frame renders. In native implementation, if no default frame size is passed (through VideoController), a starting 1 pixel sized texture/surface is created to initialize the render context & check for H/W support.
                                                 // This is then resized based on the video dimensions & accordingly texture ID, texture, EGLDisplay, EGLSurface etc. (depending upon platform) are also changed. Just don't show that 1 pixel texture to the UI.

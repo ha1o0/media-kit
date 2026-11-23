@@ -68,6 +68,20 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
     case "VideoOutputManager.SetPostProcessingEffect":
       handleSetPostProcessingEffectMethodCall(call.arguments, result)
     #if os(iOS)
+      case "VideoOutputManager.GetRenderStats":
+        guard let args = call.arguments as? [String: Any],
+          let value = args["handle"] as? String, let handle = Int64(value) else {
+          result(nil)
+          return
+        }
+        videoOutputManager.renderStats(handle: handle, reset: args["reset"] as? Bool ?? false) { result($0) }
+      case "VideoOutputManager.GetHdrState":
+        guard let args = call.arguments as? [String: Any],
+          let value = args["handle"] as? String, let handle = Int64(value) else {
+          result(nil)
+          return
+        }
+        result(videoOutputManager.hdrState(handle: handle))
       case "VideoOutputManager.CopyArtwork":
         guard let args = call.arguments as? [String: Any],
           let value = args["handle"] as? String, let handle = Int64(value) else {
@@ -104,12 +118,13 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
     videoOutputManager.create(
       handle: handle!,
       configuration: configuration,
-      textureUpdateCallback: { (_ textureId: Int64, _ size: CGSize) in
+      textureUpdateCallback: { (_ textureId: Int64, _ size: CGSize, _ hdrActive: Bool) in
         self.channel.invokeMethod(
           "VideoOutput.Resize",
           arguments: [
             "handle": handle!,
             "id": textureId,
+            "hdrActive": hdrActive,
             "rect": [
               "top": 0,
               "left": 0,

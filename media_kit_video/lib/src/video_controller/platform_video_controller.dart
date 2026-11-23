@@ -38,6 +38,9 @@ abstract class PlatformVideoController {
   /// [Rect] of the video output, received from the native implementation.
   final ValueNotifier<Rect?> rect = ValueNotifier<Rect?>(null);
 
+  /// Actual iOS output, after display capability and source/target negotiation.
+  final ValueNotifier<bool> nativeHdrActive = ValueNotifier<bool>(false);
+
   /// {@macro platform_video_controller}
   PlatformVideoController(
     this.player,
@@ -79,6 +82,7 @@ abstract class PlatformVideoController {
   void dispose() {
     id.dispose();
     rect.dispose();
+    nativeHdrActive.dispose();
   }
 }
 
