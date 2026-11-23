@@ -421,7 +421,7 @@ public class VideoOutput: NSObject {
       displayedSize = logicalSize
       if usesHdrSurface {
         let view = hdrPlatformView
-        let colorSpace = texture.currentColorSpace
+        let colorSpace = (texture as? TextureIOSurface)?.currentColorSpace ?? 0
         if let view = view {
           DispatchQueue.main.async { view.surfaceView.display(frame, colorSpace: colorSpace) }
         }

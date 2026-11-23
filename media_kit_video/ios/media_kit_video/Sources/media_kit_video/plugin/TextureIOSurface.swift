@@ -13,7 +13,7 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private let updateCallback: () -> Void
   private let mpvHandle: OpaquePointer
   private let hdrOutput: Bool
-  private(set) var currentColorSpace: Int32 = Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR)
+  private(set) var currentColorSpace: Int32 = Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR.rawValue)
   private let frameLock = NSLock()
   private var currentFrame: CVPixelBuffer?
   private var pipPool: CVPixelBufferPool?
@@ -205,7 +205,7 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   }
 
   private func outputColorSpace() -> Int32 {
-    guard hdrOutput else { return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR) }
+    guard hdrOutput else { return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR.rawValue) }
     func property(_ name: String) -> String? {
       guard let value = mpv_get_property_string(mpvHandle, name) else { return nil }
       defer { mpv_free(value) }
@@ -213,12 +213,12 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
     }
     let gamma = property("video-out-params/gamma")?.lowercased()
     if gamma == "hlg" || gamma == "arib-std-b67" {
-      return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HLG)
+      return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HLG.rawValue)
     }
     if gamma == "pq" || gamma == "st2084" || gamma == "st-2084" {
-      return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HDR10)
+      return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HDR10.rawValue)
     }
-    return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR)
+    return Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR.rawValue)
   }
 
   func renderVideoFrame(_ size: CGSize, needsDecodedFrame: Bool) -> Bool {

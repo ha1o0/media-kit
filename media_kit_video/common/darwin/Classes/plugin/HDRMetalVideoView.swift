@@ -78,12 +78,12 @@ final class HDRMetalSurfaceView: UIView {
 
   private func configureColorSpace(_ colorSpace: Int32) {
     switch colorSpace {
-    case Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HLG):
+    case Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HLG.rawValue):
       if #available(iOS 13.4, *) {
         metalLayer.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_HLG)
       }
       if #available(iOS 17.0, *) { metalLayer.edrMetadata = nil }
-    case Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HDR10):
+    case Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_HDR10.rawValue):
       if #available(iOS 13.4, *) {
         metalLayer.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_PQ)
       }
