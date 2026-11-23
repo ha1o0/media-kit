@@ -1288,6 +1288,23 @@ class NativePlayer extends PlatformPlayer {
     calloc.free(data);
   }
 
+  /// Set a property without blocking the UI isolate on renderer/GPU work.
+  /// Call outside an awaited mpv event hook, whose dispatcher must remain free
+  /// to receive the asynchronous reply.
+  Future<void> setPropertyAsync(
+    String property,
+    String value, {
+    bool waitForInitialization = true,
+  }) async {
+    if (disposed) throw AssertionError('[Player] has been disposed');
+    if (waitForInitialization) {
+      await waitForPlayerInitialization;
+      await waitForVideoControllerInitializationIfAttached;
+    }
+    await _setPropertyString(property, value,
+        forceAsync: true, reportErrors: false);
+  }
+
   /// Retrieves the value of a property from the internal libmpv instance of this [Player].
   /// Please use this method only if you know what you are doing, existing methods in [Player] implementation are suited for the most use cases.
   ///

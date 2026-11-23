@@ -8,6 +8,8 @@
 package com.alexmercerind.media_kit_video;
 
 import android.os.Handler;
+import android.view.Surface;
+import java.util.ArrayList;
 import android.os.Looper;
 import android.util.Log;
 
@@ -48,6 +50,61 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
     private final TextureRegistry.SurfaceProducer surfaceProducer;
 
     private final Object lock = new Object();
+    private final ArrayList<HdrVideoPlatformView> nativeViews = new ArrayList<>();
+    private HdrVideoPlatformView presentingView;
+    private Surface selectedSurface;
+    private int selectedCapabilities;
+    private int selectedWidth;
+    private int selectedHeight;
+    private boolean disposed;
+
+    long textureId() { return surfaceProducer.id(); }
+
+    void attach(HdrVideoPlatformView view) {
+        nativeViews.add(view);
+        view.view.getHolder().setFixedSize(Math.max(1, surfaceProducer.getWidth()),
+                Math.max(1, surfaceProducer.getHeight()));
+    }
+
+    void detach(HdrVideoPlatformView view) {
+        nativeViews.remove(view);
+        selectNativeSurface();
+    }
+
+    void selectNativeSurface() {
+        if (disposed) return;
+        HdrVideoPlatformView selected = null;
+        for (HdrVideoPlatformView view : nativeViews) {
+            if (view.eligible() && (selected == null || !selected.fullscreen || view.fullscreen)) {
+                selected = view;
+            }
+        }
+        presentingView = selected;
+        Surface surface = null;
+        try {
+            surface = selected == null ? surfaceProducer.getSurface()
+                    : selected.view.getHolder().getSurface();
+        } catch (IllegalStateException ignored) {
+            // The Flutter producer can be suspended while a native view detaches.
+        }
+        final int capabilities = selected == null ? 0
+                : AndroidHdrCapabilities.mask(selected.view.getDisplay());
+        int width = surfaceProducer.getWidth();
+        int height = surfaceProducer.getHeight();
+        if (surface == selectedSurface && capabilities == selectedCapabilities
+                && width == selectedWidth && height == selectedHeight) return;
+        selectedWidth = width;
+        selectedHeight = height;
+        selectedSurface = surface;
+        selectedCapabilities = capabilities;
+        final long oldWid = wid;
+        wid = surface != null && surface.isValid() ? newGlobalObjectRef(surface) : 0;
+        id = surfaceProducer.id();
+        textureUpdateCallback.onTextureUpdate(id, wid, surfaceProducer.getWidth(),
+                surfaceProducer.getHeight(), selected != null, capabilities);
+        if (oldWid != 0) handler.postDelayed(() -> deleteGlobalObjectRef(oldWid), 5000);
+    }
+
 
     VideoOutput(TextureRegistry textureRegistryReference, TextureUpdateCallback textureUpdateCallback) {
         this.textureUpdateCallback = textureUpdateCallback;
@@ -58,6 +115,9 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
 
     public void dispose() {
         synchronized (lock) {
+            disposed = true;
+            nativeViews.clear();
+            presentingView = null;
             try {
                 surfaceProducer.getSurface().release();
             } catch (Throwable e) {
@@ -83,6 +143,9 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
                     return;
                 }
                 surfaceProducer.setSize(width, height);
+                for (HdrVideoPlatformView view : nativeViews) {
+                    view.view.getHolder().setFixedSize(width, height);
+                }
                 onSurfaceAvailable();
             } catch (Throwable e) {
                 Log.e(TAG, "setSurfaceSize", e);
@@ -94,9 +157,8 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
     public void onSurfaceAvailable() {
         synchronized (lock) {
             Log.i(TAG, "onSurfaceAvailable");
-            id = surfaceProducer.id();
-            wid = newGlobalObjectRef(surfaceProducer.getSurface());
-            textureUpdateCallback.onTextureUpdate(id, wid, surfaceProducer.getWidth(), surfaceProducer.getHeight());
+            if (disposed) return;
+            selectNativeSurface();
         }
     }
 
@@ -104,7 +166,9 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
     public void onSurfaceCleanup() {
         synchronized (lock) {
             Log.i(TAG, "onSurfaceCleanup");
-            textureUpdateCallback.onTextureUpdate(id, 0, surfaceProducer.getWidth(), surfaceProducer.getHeight());
+            if (!disposed && presentingView != null) return;
+            textureUpdateCallback.onTextureUpdate(id, 0, surfaceProducer.getWidth(), surfaceProducer.getHeight(), false, 0);
+            selectedSurface = null;
             if (wid != 0) {
                 final long widReference = wid;
                 handler.postDelayed(() -> deleteGlobalObjectRef(widReference), 5000);

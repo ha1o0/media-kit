@@ -14,6 +14,19 @@ enum IOSHdrOutputPolicy {
   }
 }
 
+/// Candidates arrive in creation order, which is not route visibility order.
+enum IOSHdrPresentationPolicy {
+  struct Candidate {
+    let eligible: Bool
+    let fullscreen: Bool
+  }
+
+  static func selectedIndex(_ candidates: [Candidate]) -> Int? {
+    candidates.indices.last { candidates[$0].eligible && candidates[$0].fullscreen }
+      ?? candidates.indices.last { candidates[$0].eligible }
+  }
+}
+
 /// Standard-message-codec-safe diagnostics (enabled only by the device probe).
 enum IOSRenderTiming {
   static func summary(_ values: [Double]) -> [String: Any] {

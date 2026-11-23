@@ -38,7 +38,10 @@ abstract class PlatformVideoController {
   /// [Rect] of the video output, received from the native implementation.
   final ValueNotifier<Rect?> rect = ValueNotifier<Rect?>(null);
 
-  /// Actual iOS output, after display capability and source/target negotiation.
+  /// A direct Android SurfaceView is required before HDR buffers are produced.
+  final ValueNotifier<bool> androidNativeSurface = ValueNotifier<bool>(false);
+
+  /// Actual native output, after display capability and source/target negotiation.
   final ValueNotifier<bool> nativeHdrActive = ValueNotifier<bool>(false);
 
   /// {@macro platform_video_controller}
@@ -83,6 +86,7 @@ abstract class PlatformVideoController {
     id.dispose();
     rect.dispose();
     nativeHdrActive.dispose();
+    androidNativeSurface.dispose();
   }
 }
 
@@ -158,6 +162,10 @@ class VideoControllerConfiguration {
   /// * [vo] != gpu : `false`
   final bool? androidAttachSurfaceAfterVideoParameters;
 
+  /// Negotiate native Android HDR while keeping mpv GPU subtitle rendering.
+  /// Unsupported displays or native libraries retain the SDR texture path.
+  final bool androidNativeHdr;
+
   /// {@macro video_controller_configuration}
   const VideoControllerConfiguration({
     this.vo,
@@ -171,6 +179,7 @@ class VideoControllerConfiguration {
     this.nativeWindowKey,
     this.nativeWindowHandle,
     this.androidAttachSurfaceAfterVideoParameters,
+    this.androidNativeHdr = false,
   });
 
   /// Returns a copy of this class with the given fields replaced by the new values.
@@ -186,9 +195,11 @@ class VideoControllerConfiguration {
     int? nativeWindowKey,
     Future<int>? nativeWindowHandle,
     bool? androidAttachSurfaceAfterVideoParameters,
+    bool? androidNativeHdr,
   }) =>
       VideoControllerConfiguration(
         vo: vo ?? this.vo,
+        androidNativeHdr: androidNativeHdr ?? this.androidNativeHdr,
         hwdec: hwdec ?? this.hwdec,
         scale: scale ?? this.scale,
         width: width ?? this.width,

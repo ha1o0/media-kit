@@ -36,6 +36,13 @@ public class VideoOutputManager {
         }
     }
 
+    VideoOutput findByTextureId(long id) {
+        for (VideoOutput output : videoOutputs.values()) {
+            if (output.textureId() == id) return output;
+        }
+        return null;
+    }
+
     public void dispose(long handle) {
         synchronized (lock) {
             Log.i(TAG, String.format(Locale.ENGLISH, "com.alexmercerind.media_kit_video.VideoOutputManager.dispose: %d", handle));

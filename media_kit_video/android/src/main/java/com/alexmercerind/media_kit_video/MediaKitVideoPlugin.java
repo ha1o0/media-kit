@@ -10,6 +10,12 @@ package com.alexmercerind.media_kit_video;
 import androidx.annotation.NonNull;
 
 import java.util.HashMap;
+import java.util.Map;
+import android.content.Context;
+import android.view.WindowManager;
+import io.flutter.plugin.common.StandardMessageCodec;
+import io.flutter.plugin.platform.PlatformView;
+import io.flutter.plugin.platform.PlatformViewFactory;
 
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.plugin.common.MethodCall;
@@ -23,25 +29,51 @@ import io.flutter.plugin.common.MethodChannel.Result;
 public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
     private MethodChannel channel;
     private VideoOutputManager videoOutputManager;
+    private Context applicationContext;
+    private final HashMap<Integer, HdrVideoPlatformView> hdrViews = new HashMap<>();
 
     @Override
     public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
         channel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "com.alexmercerind/media_kit_video");
         channel.setMethodCallHandler(this);
 
+        applicationContext = flutterPluginBinding.getApplicationContext();
         videoOutputManager = new VideoOutputManager(flutterPluginBinding.getTextureRegistry());
+        flutterPluginBinding.getPlatformViewRegistry().registerViewFactory("media_kit_video/hdr",
+            new PlatformViewFactory(StandardMessageCodec.INSTANCE) {
+                @Override public PlatformView create(Context context, int id, Object args) {
+                    Map<?, ?> parameters = (Map<?, ?>) args;
+                    long textureId = ((Number) parameters.get("textureId")).longValue();
+                    VideoOutput output = videoOutputManager.findByTextureId(textureId);
+                    if (output == null) throw new IllegalStateException("Video output disposed");
+                    HdrVideoPlatformView view = new HdrVideoPlatformView(context, output,
+                        Boolean.TRUE.equals(parameters.get("fullscreen")), parameters,
+                        () -> hdrViews.remove(id));
+                    hdrViews.put(id, view);
+                    return view;
+                }
+            });
 
     }
 
     @Override
     public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
         switch (call.method) {
+            case "HdrVideoView.UpdateLayout": {
+                Number id = call.argument("viewId");
+                HdrVideoPlatformView view = id == null ? null : hdrViews.get(id.intValue());
+                if (view != null) view.updateLayout((Map<?, ?>) call.arguments);
+                result.success(null);
+                break;
+            }
             case "VideoOutputManager.Create": {
                 final long handle = Long.parseLong(call.argument("handle"));
-                videoOutputManager.create(handle, (id, wid, width, height) -> channel.invokeMethod("VideoOutput.Resize", new HashMap<String, Object>() {{
+                videoOutputManager.create(handle, (id, wid, width, height, nativeSurface, hdrCapabilities) -> channel.invokeMethod("VideoOutput.Resize", new HashMap<String, Object>() {{
                     put("handle", handle);
                     put("id", id);
                     put("wid", wid);
+                    put("nativeSurface", nativeSurface);
+                    put("hdrCapabilities", hdrCapabilities);
                     put("rect", new HashMap<String, Object>() {{
                         put("left", 0);
                         put("top", 0);
@@ -66,6 +98,11 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
                 result.success(null);
                 break;
             }
+            case "Utils.HdrCapabilities": {
+                WindowManager wm = (WindowManager) applicationContext.getSystemService(Context.WINDOW_SERVICE);
+                result.success(wm == null ? 0 : AndroidHdrCapabilities.mask(wm.getDefaultDisplay()));
+                break;
+            }
             case "Utils.IsEmulator": {
                 result.success(Utils.isEmulator());
                 break;
@@ -80,5 +117,6 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
     @Override
     public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
         channel.setMethodCallHandler(null);
+        hdrViews.clear();
     }
 }

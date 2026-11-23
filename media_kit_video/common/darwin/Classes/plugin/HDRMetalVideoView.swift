@@ -27,6 +27,54 @@ final class HDRMetalSurfaceView: UIView {
   private let measuresRenderTime = ProcessInfo.processInfo.environment["BOTA_IOS_RENDER_PROBE"] == "1"
   private var submitTimes: [Double] = []
   private var gpuTimes: [Double] = []
+  var onPresentationEligibilityChanged: (() -> Void)?
+  private var lastPresentationEligibility = false
+  private var presentationEnabled = false
+
+  var isEligibleForPresentation: Bool {
+    guard window != nil, bounds.width > 0, bounds.height > 0 else { return false }
+    var ancestor: UIView? = self
+    while let view = ancestor {
+      if view.isHidden || view.alpha <= 0 { return false }
+      ancestor = view.superview
+    }
+    return true
+  }
+
+  func setPresentationEnabled(_ enabled: Bool) {
+    presentationEnabled = enabled
+    if !enabled {
+      presentationActivity.isActive = false
+      pendingFrame.discard()
+      currentFrame = nil
+    }
+  }
+
+  private func updatePresentationEligibility() {
+    let eligible = isEligibleForPresentation
+    if eligible != lastPresentationEligibility {
+      lastPresentationEligibility = eligible
+      onPresentationEligibilityChanged?()
+    }
+  }
+
+  func compositionState() -> [String: Any] {
+    var ancestors: [[String: Any]] = []
+    var current: UIView? = self
+    while let view = current {
+      ancestors.append(["class": String(describing: type(of: view)),
+        "frame": String(describing: view.frame), "bounds": String(describing: view.bounds),
+        "alpha": view.alpha, "hidden": view.isHidden,
+        "transform": String(describing: view.transform),
+        "children": view.subviews.map { child in
+          ["class": String(describing: type(of: child)), "frame": String(describing: child.frame),
+           "children": child.subviews.map { String(describing: type(of: $0)) } ] as [String: Any]
+        }])
+      current = view.superview
+    }
+    return ["ancestors": ancestors, "window": window != nil,
+      "hasFrame": currentFrame != nil, "drawableSize": String(describing: metalLayer.drawableSize)]
+  }
 
   func renderStats(reset: Bool) -> [String: Any] {
     let stats: [String: Any] = ["submit": IOSRenderTiming.summary(submitTimes), "gpu": IOSRenderTiming.summary(gpuTimes)]
@@ -65,11 +113,13 @@ final class HDRMetalSurfaceView: UIView {
 
   override func layoutSubviews() {
     super.layoutSubviews()
+    updatePresentationEligibility()
     drawFrame()
   }
 
   override func didMoveToWindow() {
     super.didMoveToWindow()
+    updatePresentationEligibility()
     drawFrame()
   }
 
@@ -82,7 +132,7 @@ final class HDRMetalSurfaceView: UIView {
   private func drawFrame() {
     // Flutter initially creates the UIKit view with an empty frame. Retain the
     // image until layout/window attachment, including a paused first frame.
-    let active = window != nil && bounds.width > 0 && bounds.height > 0 &&
+    let active = presentationEnabled && isEligibleForPresentation &&
       UIApplication.shared.applicationState == .active
     presentationActivity.isActive = active
     guard active, let frame = currentFrame else { pendingFrame.discard(); return }
@@ -221,9 +271,11 @@ final class HDRMetalSurfaceView: UIView {
 
 final class HDRMetalVideoPlatformView: NSObject, FlutterPlatformView {
   let surfaceView: HDRMetalSurfaceView
+  let fullscreen: Bool
   var onDispose: (() -> Void)?
 
-  init(frame: CGRect) {
+  init(frame: CGRect, fullscreen: Bool) {
+    self.fullscreen = fullscreen
     surfaceView = HDRMetalSurfaceView(frame: frame)
     super.init()
   }
@@ -252,8 +304,10 @@ final class HDRMetalVideoPlatformViewFactory: NSObject, FlutterPlatformViewFacto
     viewIdentifier viewId: Int64,
     arguments args: Any?
   ) -> FlutterPlatformView {
-    let platformView = HDRMetalVideoPlatformView(frame: frame)
-    if let dictionary = args as? [String: Any],
+    let dictionary = args as? [String: Any]
+    let platformView = HDRMetalVideoPlatformView(frame: frame,
+      fullscreen: dictionary?["fullscreen"] as? Bool ?? false)
+    if let dictionary = dictionary,
       let textureId = dictionary["textureId"] as? NSNumber {
       attach(textureId.int64Value, platformView)
     }

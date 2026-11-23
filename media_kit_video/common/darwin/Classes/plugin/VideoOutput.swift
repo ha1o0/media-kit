@@ -67,11 +67,13 @@ public class VideoOutput: NSObject {
     private var pipRendering = false
     private var pipFrameDelivery = false
     private var lastPipPreviewFrame = 0.0
+    private var hdrPipFrameConverter: HDRPictureInPictureFrameConverter?
     // Platform views can overlap while entering/leaving fullscreen. Keep all
     // live views, and replay the last frame when a paused view is attached.
     // These presentation fields are only accessed on the main thread.
     private let hdrPlatformViews = NSHashTable<HDRMetalVideoPlatformView>.weakObjects()
     private var hdrPlatformViewOrder: [ObjectIdentifier] = []
+    private weak var presentingHdrView: HDRMetalVideoPlatformView?
     private var hdrFrame: (pixel: CVPixelBuffer, colorSpace: Int32, minLuminance: Float, maxLuminance: Float)?
     private var lastInlineHdrActive = false
     private var potentialHdrHeadroom: Double = 1
@@ -117,6 +119,7 @@ public class VideoOutput: NSObject {
           if !frames {
             that.pendingPipFrame.discard()
             that.pipFrameSource = .undecided
+            that.hdrPipFrameConverter?.reset()
           }
           that.pipPolicy.presenting = active
           that.updatePictureInPictureRenderer()
@@ -231,14 +234,18 @@ public class VideoOutput: NSObject {
     }
 
     func renderStats(reset: Bool, completion: @escaping ([String: Any]) -> Void) {
-      let presentation = hdrPlatformViews.allObjects.first(where: {
-        ObjectIdentifier($0) == hdrPlatformViewOrder.last
-      })?.surfaceView.renderStats(reset: reset) ?? [:]
+      let views = hdrPlatformViews.allObjects.map { view in
+        ["identity": String(describing: ObjectIdentifier(view)),
+         "selected": view === presentingHdrView, "fullscreen": view.fullscreen,
+         "state": view.surfaceView.compositionState()] as [String: Any]
+      }
+      let presentation = presentingHdrView?.surfaceView.renderStats(reset: reset) ?? [:]
       worker.enqueue { [weak self] in
         guard let self = self else { return }
         var stats = IOSRenderTiming.summary(self.renderTimes)
         stats["pixelFormat"] = self.inlineTexture.latestFrame.map { CVPixelBufferGetPixelFormatType($0) } ?? 0
         stats["presentation"] = presentation
+        stats["views"] = views
         if reset { self.renderTimes.removeAll(keepingCapacity: true) }
         DispatchQueue.main.async { completion(stats) }
       }
@@ -248,6 +255,9 @@ public class VideoOutput: NSObject {
       hdrPlatformViews.add(view)
       let identity = ObjectIdentifier(view)
       hdrPlatformViewOrder.append(identity)
+      view.surfaceView.onPresentationEligibilityChanged = { [weak self] in
+        self?.displayHdrFrame()
+      }
       view.onDispose = { [weak self] in
         self?.hdrPlatformViewOrder.removeAll { $0 == identity }
         self?.displayHdrFrame()
@@ -258,10 +268,18 @@ public class VideoOutput: NSObject {
     private func displayHdrFrame() {
       let views = hdrPlatformViews.allObjects
       hdrPlatformViewOrder.removeAll { id in !views.contains { ObjectIdentifier($0) == id } }
-      // Fullscreen owns presentation while its view is alive. Do not blit the
-      // same HDR frame twice to the covered inline view on every callback.
-      guard let identity = hdrPlatformViewOrder.last,
-        let view = views.first(where: { ObjectIdentifier($0) == identity }) else { return }
+      // An offstage inline Video can create its UIKit view after fullscreen.
+      // Creation order alone must never hand it the visible player's frames.
+      let ordered = hdrPlatformViewOrder.compactMap { identity in
+        views.first { ObjectIdentifier($0) == identity }
+      }
+      let index = IOSHdrPresentationPolicy.selectedIndex(ordered.map {
+        .init(eligible: $0.surfaceView.isEligibleForPresentation, fullscreen: $0.fullscreen)
+      })
+      let selected = index.map { ordered[$0] }
+      presentingHdrView = selected
+      for view in views { view.surfaceView.setPresentationEnabled(view === selected) }
+      guard let view = selected else { return }
       if let frame = hdrFrame {
         view.surfaceView.display(frame.pixel, colorSpace: frame.colorSpace,
           minLuminance: frame.minLuminance, maxLuminance: frame.maxLuminance)
@@ -627,6 +645,17 @@ public class VideoOutput: NSObject {
         }
       }
       pipFrameSource = .composited
+      if CVPixelBufferGetPixelFormatType(pixel) != kCVPixelFormatType_32BGRA {
+        guard let renderer = texture as? TextureIOSurface else { return }
+        if hdrPipFrameConverter == nil {
+          hdrPipFrameConverter = HDRPictureInPictureFrameConverter()
+        }
+        guard let copy = hdrPipFrameConverter?.convert(pixel, colorSpace: renderer.currentColorSpace)
+          else { return }
+        lastPipPreviewFrame = previewTime
+        enqueuePictureInPictureFrame(copy, handoff: handoff)
+        return
+      }
       guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_32BGRA else { return }
       let sourceWidth = CVPixelBufferGetWidth(pixel)
       let sourceHeight = CVPixelBufferGetHeight(pixel)

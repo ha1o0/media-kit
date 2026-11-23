@@ -41,13 +41,48 @@ class AndroidVideoController extends PlatformVideoController {
     await platform.setProperty(key, value, waitForInitialization: false);
   }
 
-  Future<void> setProperties(Map<String, String> properties) async {
+  Future<void> setProperties(Map<String, String> properties,
+      {bool asynchronous = false}) async {
     for (final entry in properties.entries) {
-      await setProperty(entry.key, entry.value);
+      if (asynchronous) {
+        await platform.setPropertyAsync(entry.key, entry.value,
+            waitForInitialization: false);
+      } else {
+        await setProperty(entry.key, entry.value);
+      }
     }
   }
 
   String? _fileVideoOutput;
+  bool _nativeHdrSupported = false;
+  int _surfaceHdrCapabilities = 0;
+  bool _nativeSurfaceSelected = false;
+  bool _disposed = false;
+  bool _observesTarget = false;
+  bool _nativeSurfaceFailed = false;
+  StreamSubscription<PlayerLog>? _renderLogSubscription;
+  String _lastOutputSummary = '';
+
+  Future<void> _onTargetChanged(String value) async {
+    if (_disposed) return;
+    try {
+      final target = jsonDecode(value);
+      final active = _nativeSurfaceSelected &&
+          target is Map &&
+          target['primaries'] == 'bt.2020' &&
+          const {'pq', 'hlg'}.contains(target['gamma']);
+      nativeHdrActive.value = active;
+      final summary = target is Map
+          ? '${target['primaries']}/${target['gamma']} format=${target['pixelformat']} native=$_nativeSurfaceSelected'
+          : 'unavailable';
+      if (!kReleaseMode && summary != _lastOutputSummary) {
+        debugPrint('Android HDR output: $summary');
+        _lastOutputSummary = summary;
+      }
+    } on FormatException {
+      nativeHdrActive.value = false;
+    }
+  }
 
   Future<void> _onBeforeDecode() async {
     final tracks =
@@ -58,13 +93,18 @@ class AndroidVideoController extends PlatformVideoController {
     } on FormatException {
       // Missing track metadata keeps the user's configured output.
     }
-    _fileVideoOutput = androidVideoOutputForTracks(configuration.vo!, decoded);
+    androidNativeSurface.value = _nativeHdrSupported &&
+        !_nativeSurfaceFailed &&
+        androidTracksHaveHdr(decoded);
+    _fileVideoOutput = androidVideoOutputForTracks(configuration.vo!, decoded,
+        nativeHdr: _nativeHdrSupported);
     final currentDecoder =
         await platform.getProperty('hwdec', waitForInitialization: false);
     final decoder = androidHardwareDecoderForTracks(
       currentDecoder,
       configuration.vo!,
       decoded,
+      nativeHdr: _nativeHdrSupported,
     );
     if (decoder != currentDecoder) {
       await setProperty('file-local-options/hwdec', decoder);
@@ -76,11 +116,13 @@ class AndroidVideoController extends PlatformVideoController {
 
   Future<void> _onUnload() async {
     _fileVideoOutput = null;
+    nativeHdrActive.value = false;
   }
 
   /// Listener for updating the --wid property.
   Future<void> widListener() {
     return lock.synchronized(() async {
+      if (_disposed) return;
       final width = rect.value?.width.toInt() ?? 1;
       final height = rect.value?.height.toInt() ?? 1;
       final androidSurfaceSizeValue = [width, height].join('x');
@@ -90,17 +132,22 @@ class AndroidVideoController extends PlatformVideoController {
           widValue == '0' ? 'null' : (_fileVideoOutput ?? configuration.vo!);
       final vidValue = widValue == '0' ? 'no' : 'auto';
       // It is important to re-initialize --vo after --android-surface-size.
-      await setProperty('vo', 'null');
+      await platform.setPropertyAsync('vo', 'null',
+          waitForInitialization: false);
       await setProperties(
         {
           // ORDER IS IMPORTANT.
           'android-surface-size': androidSurfaceSizeValue,
           'wid': widValue,
+          if (_nativeHdrSupported)
+            'android-hdr-capabilities':
+                _nativeSurfaceSelected ? '$_surfaceHdrCapabilities' : '0',
           'vo': voValue,
           // It is important to re-initialize --vid in-case of --vo=mediacodec_embed.
           // Not doing so causes error "Could not open codec." & video never gets rendered.
           if (configuration.vo == 'mediacodec_embed') 'vid': vidValue,
         },
+        asynchronous: true,
       );
       // Instead of seeking to the start (Duration.zero), seek to the current playback position
       // without jumping the user to the start of the media.
@@ -220,6 +267,18 @@ class AndroidVideoController extends PlatformVideoController {
 
     // Store the [VideoController] in the [_controllers].
     _controllers[handle] = controller;
+    if (configuration.androidNativeHdr) {
+      try {
+        final option = await controller.platform.getProperty(
+            'option-info/android-hdr-capabilities',
+            waitForInitialization: false);
+        final caps =
+            await _channel.invokeMethod<int>('Utils.HdrCapabilities') ?? 0;
+        controller._nativeHdrSupported = option.isNotEmpty && caps != 0;
+      } catch (_) {
+        // An older plugin or library cannot accept HDR buffers safely.
+      }
+    }
 
     await _channel.invokeMethod(
       'VideoOutputManager.Create',
@@ -237,6 +296,7 @@ class AndroidVideoController extends PlatformVideoController {
         'opengl-es': 'yes',
         'force-window': 'yes',
         'gpu-context': 'android',
+        if (controller._nativeHdrSupported) 'android-hdr-capabilities': '0',
         'sub-use-margins': 'no',
         'sub-font-provider': 'none',
         'sub-scale-with-window': 'yes',
@@ -244,6 +304,36 @@ class AndroidVideoController extends PlatformVideoController {
       },
     );
 
+    if (controller._nativeHdrSupported) {
+      await controller.platform.observeProperty(
+          'video-target-params', controller._onTargetChanged,
+          waitForInitialization: false);
+      controller._observesTarget = true;
+      controller._renderLogSubscription = player.stream.log.listen((entry) {
+        if (controller._disposed ||
+            controller._nativeSurfaceFailed ||
+            !controller._nativeSurfaceSelected) {
+          return;
+        }
+        if (entry.level == 'error' || entry.level == 'fatal') {
+          final failed = entry.text.contains('Could not create EGL surface') ||
+              entry.text.contains('Failed to set context') ||
+              entry.text.contains('Failed restoring SDR EGL surface') ||
+              entry.text.contains('Failed rendering frame');
+          if (failed) {
+            // Schedule outside mpv's event dispatch; reinitializing VO here
+            // synchronously would deadlock its native callback.
+            controller._nativeSurfaceFailed = true;
+            scheduleMicrotask(() {
+              if (!controller._disposed) {
+                controller.nativeHdrActive.value = false;
+                controller.androidNativeSurface.value = false;
+              }
+            });
+          }
+        }
+      });
+    }
     // Return the [PlatformVideoController].
     return controller;
   }
@@ -266,12 +356,17 @@ class AndroidVideoController extends PlatformVideoController {
 
   /// Disposes the instance. Releases allocated resources back to the system.
   Future<void> _dispose() async {
-    super.dispose();
+    _disposed = true;
+    if (_observesTarget && !platform.disposed) {
+      await platform.unobserveProperty('video-target-params',
+          waitForInitialization: false);
+    }
     platform.onBeforeDecodeHooks.remove(_onBeforeDecode);
     platform.onUnloadHooks.remove(_onUnload);
     wid.removeListener(widListener);
     wid.dispose();
     await videoParamsSubscription?.cancel();
+    await _renderLogSubscription?.cancel();
     final handle = await player.handle;
     _controllers.remove(handle);
     await _channel.invokeMethod(
@@ -280,59 +375,72 @@ class AndroidVideoController extends PlatformVideoController {
         'handle': handle.toString(),
       },
     );
+    super.dispose();
   }
 
   /// Currently created [AndroidVideoController]s.
   static final _controllers = HashMap<int, AndroidVideoController>();
 
   /// [MethodChannel] for invoking platform specific native implementation.
-  static final _channel =
-      const MethodChannel('com.alexmercerind/media_kit_video')
-        ..setMethodCallHandler(
-          (MethodCall call) async {
-            try {
-              debugPrint(call.method.toString());
-              debugPrint(call.arguments.toString());
-              switch (call.method) {
-                case 'VideoOutput.Resize':
-                  {
-                    // Notify about updated texture ID & [Rect].
-                    final int handle = call.arguments['handle'];
-                    final Rect rect = Rect.fromLTWH(
-                      call.arguments['rect']['left'] * 1.0,
-                      call.arguments['rect']['top'] * 1.0,
-                      call.arguments['rect']['width'] * 1.0,
-                      call.arguments['rect']['height'] * 1.0,
-                    );
-                    final int id = call.arguments['id'];
-                    final int wid = call.arguments['wid'];
-                    _controllers[handle]?.rect.value = rect;
-                    _controllers[handle]?.id.value = id;
-                    _controllers[handle]?.wid.value = wid;
-                    break;
-                  }
-                case 'VideoOutput.WaitUntilFirstFrameRenderedNotify':
-                  {
-                    // Notify about updated texture ID & [Rect].
-                    final int handle = call.arguments['handle'];
-                    debugPrint(handle.toString());
-                    // Notify about the first frame being rendered.
-                    final completer = _controllers[handle]
-                        ?.waitUntilFirstFrameRenderedCompleter;
-                    if (!(completer?.isCompleted ?? true)) {
-                      completer?.complete();
-                    }
-                    break;
-                  }
-                default:
-                  {
-                    break;
-                  }
+  static final _channel = const MethodChannel(
+      'com.alexmercerind/media_kit_video')
+    ..setMethodCallHandler(
+      (MethodCall call) async {
+        try {
+          debugPrint(call.method.toString());
+          debugPrint(call.arguments.toString());
+          switch (call.method) {
+            case 'VideoOutput.Resize':
+              {
+                // Notify about updated texture ID & [Rect].
+                final int handle = call.arguments['handle'];
+                final Rect rect = Rect.fromLTWH(
+                  call.arguments['rect']['left'] * 1.0,
+                  call.arguments['rect']['top'] * 1.0,
+                  call.arguments['rect']['width'] * 1.0,
+                  call.arguments['rect']['height'] * 1.0,
+                );
+                final int id = call.arguments['id'];
+                final int wid = call.arguments['wid'];
+                final controller = _controllers[handle];
+                if (controller == null || controller._disposed) break;
+                final caps = call.arguments['hdrCapabilities'] as int? ?? 0;
+                final native = call.arguments['nativeSurface'] == true;
+                final changed = caps != controller._surfaceHdrCapabilities ||
+                    native != controller._nativeSurfaceSelected;
+                controller._surfaceHdrCapabilities = caps;
+                controller._nativeSurfaceSelected = native;
+                controller.rect.value = rect;
+                controller.id.value = id;
+                if (wid == controller.wid.value && changed) {
+                  unawaited(controller.widListener());
+                } else {
+                  controller.wid.value = wid;
+                }
+                break;
               }
-            } catch (exception, stacktrace) {
-              debugPrint(exception.toString());
-              debugPrint(stacktrace.toString());
-            }
-          },
-        );
+            case 'VideoOutput.WaitUntilFirstFrameRenderedNotify':
+              {
+                // Notify about updated texture ID & [Rect].
+                final int handle = call.arguments['handle'];
+                debugPrint(handle.toString());
+                // Notify about the first frame being rendered.
+                final completer =
+                    _controllers[handle]?.waitUntilFirstFrameRenderedCompleter;
+                if (!(completer?.isCompleted ?? true)) {
+                  completer?.complete();
+                }
+                break;
+              }
+            default:
+              {
+                break;
+              }
+          }
+        } catch (exception, stacktrace) {
+          debugPrint(exception.toString());
+          debugPrint(stacktrace.toString());
+        }
+      },
+    );
 }
