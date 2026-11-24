@@ -29,18 +29,20 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
     )
     registrar.addMethodCallDelegate(instance, channel: channel)
     #if os(iOS)
-      registrar.register(
-        HDRMetalVideoPlatformViewFactory { textureId, view in
-          instance.videoOutputManager.attachHdrView(textureId: textureId, view: view)
-        },
-        withId: "media_kit_video/hdr"
-      )
+      let factory = HDRMetalVideoPlatformViewFactory { [weak instance] textureId, view in
+        instance?.videoOutputManager.attachHdrView(textureId: textureId, view: view)
+      }
+      instance.hdrViewFactory = factory
+      registrar.register(factory, withId: "media_kit_video/hdr")
     #endif
   }
 
   private let channel: FlutterMethodChannel
   private let videoOutputManager: VideoOutputManager
   private let utils: UtilsProtocol?
+  #if os(iOS)
+    private var hdrViewFactory: HDRMetalVideoPlatformViewFactory?
+  #endif
 
   init(
     registry: FlutterTextureRegistry,
@@ -68,6 +70,14 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
     case "VideoOutputManager.SetPostProcessingEffect":
       handleSetPostProcessingEffectMethodCall(call.arguments, result)
     #if os(iOS)
+      case "IOSHdrVideoView.UpdateLayout":
+        guard let args = call.arguments as? [String: Any],
+          let viewId = args["viewId"] as? NSNumber else {
+          result(nil)
+          return
+        }
+        hdrViewFactory?.updateLayout(viewId: viewId.int64Value, arguments: args)
+        result(nil)
       case "VideoOutputManager.GetRenderStats":
         guard let args = call.arguments as? [String: Any],
           let value = args["handle"] as? String, let handle = Int64(value) else {

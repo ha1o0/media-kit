@@ -5,6 +5,7 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'dart:io';
 import 'android_native_video.dart';
+import 'ios_native_video.dart';
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
@@ -650,6 +651,70 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
     return Platform.isWindows ? RepaintBoundary(child: child) : child;
   }
 
+  Widget _iosViewportFill(Color fill, Widget Function(Color) builder) {
+    if (!Platform.isIOS) return builder(fill);
+    return ValueListenableBuilder<PlatformVideoController?>(
+      valueListenable: widget.controller.notifier,
+      builder: (context, controller, _) => IOSNativeVideoBackground(
+        nativeHdrActive: controller?.nativeHdrActive ??
+            const AlwaysStoppedAnimation<bool>(false),
+        textureId: controller?.id,
+        pictureRect: controller?.rect,
+        visible: _visible,
+        renderTexture: widget.renderTexture,
+        hideInlineVideo: widget.hideInlineVideo,
+        fill: fill,
+        builder: builder,
+      ),
+    );
+  }
+
+  Widget _iosNativeOrTexture(VideoViewParameters parameters, Widget texture) {
+    if (!Platform.isIOS) return texture;
+    return ValueListenableBuilder<PlatformVideoController?>(
+      valueListenable: widget.controller.notifier,
+      builder: (context, controller, _) {
+        if (controller == null) return texture;
+        return ValueListenableBuilder<bool>(
+          valueListenable: controller.nativeHdrActive,
+          builder: (context, native, _) {
+            if (!native) return texture;
+            return ValueListenableBuilder<int?>(
+              valueListenable: controller.id,
+              builder: (context, id, _) => ValueListenableBuilder<Rect?>(
+                valueListenable: controller.rect,
+                builder: (context, rect, _) {
+                  if (id == null ||
+                      rect == null ||
+                      !_visible ||
+                      rect.width <= 1 ||
+                      rect.height <= 1) {
+                    return const SizedBox.expand();
+                  }
+                  return IOSNativeVideo(
+                    key: ValueKey(id),
+                    textureId: id,
+                    fullscreen: media_kit_video_controls.isFullscreen(context),
+                    source: Size(
+                        parameters.aspectRatio == null
+                            ? rect.width
+                            : rect.height * parameters.aspectRatio!,
+                        rect.height),
+                    fit: parameters.fit,
+                    alignment: parameters.alignment,
+                    rotation: parameters.visualRotation,
+                    mirror: parameters.visualMirror,
+                    fill: parameters.fill,
+                  );
+                },
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _androidNativeOrTexture(
       VideoViewParameters parameters, Widget texture) {
     if (!Platform.isAndroid) return texture;
@@ -728,105 +793,80 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                 if (widget.renderTexture)
                   _maybeRepaintBoundary(
                     child: ClipRect(
-                      child: _androidNativeOrTexture(
-                          videoViewParameters,
-                          FittedBox(
-                            fit: videoViewParameters.fit,
-                            alignment: videoViewParameters.alignment,
-                            child: ValueListenableBuilder<
-                                PlatformVideoController?>(
-                              valueListenable: widget.controller.notifier,
-                              builder: (context, notifier, _) => notifier ==
-                                      null
-                                  ? const SizedBox.shrink()
-                                  : ValueListenableBuilder<int?>(
-                                      valueListenable: notifier.id,
-                                      builder: (context, id, _) {
-                                        return ValueListenableBuilder<Rect?>(
-                                          valueListenable: notifier.rect,
-                                          builder: (context, rect, _) {
-                                            if (id != null &&
-                                                rect != null &&
-                                                _visible) {
-                                              final view = SizedBox(
-                                                // Apply aspect ratio if provided.
-                                                width: videoViewParameters
-                                                            .aspectRatio ==
-                                                        null
-                                                    ? rect.width
-                                                    : rect.height *
-                                                        videoViewParameters
-                                                            .aspectRatio!,
-                                                height: rect.height,
-                                                child: Stack(
-                                                  children: [
-                                                    const SizedBox(),
-                                                    Positioned.fill(
-                                                      child:
-                                                          ValueListenableBuilder<
-                                                              bool>(
-                                                        valueListenable: notifier
-                                                            .nativeHdrActive,
-                                                        builder: (context,
-                                                                nativeHdrActive,
-                                                                _) =>
-                                                            Platform.isIOS &&
-                                                                    nativeHdrActive
-                                                                ? UiKitView(
-                                                                    key:
-                                                                        ValueKey(
-                                                                            id),
-                                                                    viewType:
-                                                                        'media_kit_video/hdr',
-                                                                    creationParams: {
-                                                                      'textureId':
-                                                                          id,
-                                                                      'fullscreen':
-                                                                          media_kit_video_controls
-                                                                              .isFullscreen(context),
-                                                                    },
-                                                                    creationParamsCodec:
-                                                                        const StandardMessageCodec(),
-                                                                  )
-                                                                : Texture(
-                                                                    textureId:
-                                                                        id,
-                                                                    filterQuality:
-                                                                        videoViewParameters
-                                                                            .filterQuality,
-                                                                  ),
-                                                      ),
-                                                    ),
-                                                    // Keep the |Texture| hidden before the first frame renders. In native implementation, if no default frame size is passed (through VideoController), a starting 1 pixel sized texture/surface is created to initialize the render context & check for H/W support.
-                                                    // This is then resized based on the video dimensions & accordingly texture ID, texture, EGLDisplay, EGLSurface etc. (depending upon platform) are also changed. Just don't show that 1 pixel texture to the UI.
-                                                    // NOTE: Unmounting |Texture| causes the |MarkTextureFrameAvailable| to not do anything on GNU/Linux.
-                                                    if (rect.width <= 1.0 &&
-                                                        rect.height <= 1.0)
+                      child: _iosNativeOrTexture(
+                        videoViewParameters,
+                        _androidNativeOrTexture(
+                            videoViewParameters,
+                            FittedBox(
+                              fit: videoViewParameters.fit,
+                              alignment: videoViewParameters.alignment,
+                              child: ValueListenableBuilder<
+                                  PlatformVideoController?>(
+                                valueListenable: widget.controller.notifier,
+                                builder: (context, notifier, _) => notifier ==
+                                        null
+                                    ? const SizedBox.shrink()
+                                    : ValueListenableBuilder<int?>(
+                                        valueListenable: notifier.id,
+                                        builder: (context, id, _) {
+                                          return ValueListenableBuilder<Rect?>(
+                                            valueListenable: notifier.rect,
+                                            builder: (context, rect, _) {
+                                              if (id != null &&
+                                                  rect != null &&
+                                                  _visible) {
+                                                final view = SizedBox(
+                                                  // Apply aspect ratio if provided.
+                                                  width: videoViewParameters
+                                                              .aspectRatio ==
+                                                          null
+                                                      ? rect.width
+                                                      : rect.height *
+                                                          videoViewParameters
+                                                              .aspectRatio!,
+                                                  height: rect.height,
+                                                  child: Stack(
+                                                    children: [
+                                                      const SizedBox(),
                                                       Positioned.fill(
-                                                        child: Container(
-                                                          color:
+                                                        child: Texture(
+                                                          textureId: id,
+                                                          filterQuality:
                                                               videoViewParameters
-                                                                  .fill,
+                                                                  .filterQuality,
                                                         ),
                                                       ),
-                                                  ],
-                                                ),
-                                              );
-                                              return _VisualTransform(
-                                                rotation: videoViewParameters
-                                                    .visualRotation,
-                                                mirror: videoViewParameters
-                                                    .visualMirror,
-                                                child: view,
-                                              );
-                                            }
-                                            return const SizedBox.shrink();
-                                          },
-                                        );
-                                      },
-                                    ),
-                            ),
-                          )),
+                                                      // Keep the |Texture| hidden before the first frame renders. In native implementation, if no default frame size is passed (through VideoController), a starting 1 pixel sized texture/surface is created to initialize the render context & check for H/W support.
+                                                      // This is then resized based on the video dimensions & accordingly texture ID, texture, EGLDisplay, EGLSurface etc. (depending upon platform) are also changed. Just don't show that 1 pixel texture to the UI.
+                                                      // NOTE: Unmounting |Texture| causes the |MarkTextureFrameAvailable| to not do anything on GNU/Linux.
+                                                      if (rect.width <= 1.0 &&
+                                                          rect.height <= 1.0)
+                                                        Positioned.fill(
+                                                          child: Container(
+                                                            color:
+                                                                videoViewParameters
+                                                                    .fill,
+                                                          ),
+                                                        ),
+                                                    ],
+                                                  ),
+                                                );
+                                                return _VisualTransform(
+                                                  rotation: videoViewParameters
+                                                      .visualRotation,
+                                                  mirror: videoViewParameters
+                                                      .visualMirror,
+                                                  child: view,
+                                                );
+                                              }
+                                              return const SizedBox.shrink();
+                                            },
+                                          );
+                                        },
+                                      ),
+                              ),
+                            )),
+                      ),
                     ),
                   ),
                 if (videoViewParameters.subtitleViewConfiguration.visible &&
@@ -843,12 +883,12 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                     ),
                   ),
               ];
-          final viewport = Container(
+          Widget viewportWithFill(Color fill) => Container(
             key: _nativeWindowViewportKey,
             clipBehavior: Clip.none,
             width: videoViewParameters.width,
             height: videoViewParameters.height,
-            color: videoViewParameters.fill,
+            color: fill,
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -882,6 +922,10 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                   ),
               ],
             ),
+          );
+          final viewport = _iosViewportFill(
+            videoViewParameters.fill,
+            viewportWithFill,
           );
           if (widget.renderTexture) return viewport;
           return _NativeWindowGeometryObserver(

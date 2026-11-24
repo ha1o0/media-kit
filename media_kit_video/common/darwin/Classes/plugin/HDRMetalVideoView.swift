@@ -141,7 +141,6 @@ final class HDRMetalSurfaceView: UIView {
 
   override func didMoveToWindow() {
     super.didMoveToWindow()
-    PlatformViewBackdropTouchRouting.install(for: self)
     updatePresentationEligibility()
     drawFrame()
   }
@@ -370,26 +369,83 @@ enum PlatformViewBackdropTouchRouting {
   }
 }
 
+/// Flutter's blur intersects its platform-view boundary. Keep that boundary
+/// viewport-sized and fit only the video child, including the Dolby Vision
+/// surface and its subtitle layer, inside it.
+final class HDRMetalViewportView: UIView {
+  let surfaceView = HDRMetalSurfaceView(frame: .zero)
+  private var videoLayout = IOSNativeVideoLayout()
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    clipsToBounds = true
+    backgroundColor = .black
+    addSubview(surfaceView)
+  }
+
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  func updateLayout(_ arguments: [String: Any]) {
+    guard let layout = IOSNativeVideoLayout(arguments: arguments) else { return }
+    videoLayout = layout
+    let color = layout.fill
+    let alpha = CGFloat((color >> 24) & 0xff) / 255
+    backgroundColor = UIColor(red: CGFloat((color >> 16) & 0xff) / 255,
+      green: CGFloat((color >> 8) & 0xff) / 255, blue: CGFloat(color & 0xff) / 255,
+      alpha: alpha)
+    isOpaque = alpha == 1
+    setNeedsLayout()
+    layoutIfNeeded()
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    guard let geometry = videoLayout.geometry(in: bounds.size) else { return }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    surfaceView.bounds = geometry.bounds
+    surfaceView.center = geometry.center
+    surfaceView.transform = geometry.transform
+    CATransaction.commit()
+    surfaceView.setNeedsLayout()
+    surfaceView.layoutIfNeeded()
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    // The root is the child of FlutterTouchInterceptingView; the inner video
+    // no longer has the ancestry the touch-routing patch expects.
+    PlatformViewBackdropTouchRouting.install(for: self)
+  }
+}
+
 final class HDRMetalVideoPlatformView: NSObject, FlutterPlatformView {
-  let surfaceView: HDRMetalSurfaceView
+  private let viewportView: HDRMetalViewportView
+  var surfaceView: HDRMetalSurfaceView { viewportView.surfaceView }
   let fullscreen: Bool
   var onDispose: (() -> Void)?
+  var onLayoutDispose: (() -> Void)?
 
   init(frame: CGRect, fullscreen: Bool) {
     self.fullscreen = fullscreen
-    surfaceView = HDRMetalSurfaceView(frame: frame)
+    viewportView = HDRMetalViewportView(frame: frame)
     super.init()
   }
 
-  func view() -> UIView { surfaceView }
+  func view() -> UIView { viewportView }
+
+  func updateLayout(_ arguments: [String: Any]) { viewportView.updateLayout(arguments) }
 
   deinit {
     if let onDispose = onDispose { DispatchQueue.main.async(execute: onDispose) }
+    if let onLayoutDispose = onLayoutDispose { DispatchQueue.main.async(execute: onLayoutDispose) }
   }
 }
 
 final class HDRMetalVideoPlatformViewFactory: NSObject, FlutterPlatformViewFactory {
   private let attach: (Int64, HDRMetalVideoPlatformView) -> Void
+  private let views = NSMapTable<NSNumber, HDRMetalVideoPlatformView>(
+    keyOptions: .strongMemory, valueOptions: .weakMemory)
 
   init(attach: @escaping (Int64, HDRMetalVideoPlatformView) -> Void) {
     self.attach = attach
@@ -400,6 +456,11 @@ final class HDRMetalVideoPlatformViewFactory: NSObject, FlutterPlatformViewFacto
     FlutterStandardMessageCodec.sharedInstance()
   }
 
+  func updateLayout(viewId: Int64, arguments: [String: Any]) {
+    // A queued update for a disposed route is a harmless no-op.
+    views.object(forKey: NSNumber(value: viewId))?.updateLayout(arguments)
+  }
+
   func create(
     withFrame frame: CGRect,
     viewIdentifier viewId: Int64,
@@ -408,6 +469,14 @@ final class HDRMetalVideoPlatformViewFactory: NSObject, FlutterPlatformViewFacto
     let dictionary = args as? [String: Any]
     let platformView = HDRMetalVideoPlatformView(frame: frame,
       fullscreen: dictionary?["fullscreen"] as? Bool ?? false)
+    let key = NSNumber(value: viewId)
+    views.setObject(platformView, forKey: key)
+    platformView.onLayoutDispose = { [weak self] in
+      guard let self = self, self.views.object(forKey: key) == nil else { return }
+      // A later platform view can reuse this ID before asynchronous cleanup.
+      self.views.removeObject(forKey: key)
+    }
+    if let dictionary = dictionary { platformView.updateLayout(dictionary) }
     if let dictionary = dictionary,
       let textureId = dictionary["textureId"] as? NSNumber {
       attach(textureId.int64Value, platformView)

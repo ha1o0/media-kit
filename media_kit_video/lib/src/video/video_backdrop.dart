@@ -31,23 +31,38 @@ class VideoBackdrop {
   /// Null until the platform has delivered a copy, or where it never will.
   ValueListenable<ui.Image?> get image => controller.backdrop;
 
+  /// Metadata belongs to this exact image, including when image decoding
+  /// completes asynchronously. Older controllers have no gutter metadata.
+  Rect contentRect(ui.Image image) {
+    final frame = controller.backdropFrame;
+    return frame != null && identical(frame.image, image)
+        ? frame.contentRect
+        : Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
+  }
+
   /// Copies are produced only while at least one panel holds a retain.
   void retain() => controller.retainBackdrop();
   void release() => controller.releaseBackdrop();
 
-  /// Global logical rectangle of the picture inside the viewport, or null
-  /// before the first layout.
-  Rect? pictureRect() {
+  /// The native video's composition boundary, letterbox bars included.
+  Rect? viewportRect() {
     if (!viewport.mounted) return null;
     final box = viewport.findRenderObject();
-    final rect = controller.rect.value;
     if (box is! RenderBox ||
         !box.attached ||
         !box.hasSize ||
-        box.size.isEmpty ||
-        rect == null ||
-        rect.width <= 1 ||
-        rect.height <= 1) {
+        box.size.isEmpty) {
+      return null;
+    }
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
+  /// Global logical rectangle of the picture inside the viewport, or null
+  /// before the first layout.
+  Rect? pictureRect() {
+    final bounds = viewportRect();
+    final rect = controller.rect.value;
+    if (bounds == null || rect == null || rect.width <= 1 || rect.height <= 1) {
       return null;
     }
     final view = parameters.value;
@@ -58,29 +73,50 @@ class VideoBackdrop {
     final quarterTurns = ((view.visualRotation % 360) + 360) % 360 ~/ 90;
     return androidNativeVideoRect(
       source,
-      box.size,
+      bounds.size,
       view.fit,
       view.alignment,
       quarterTurns,
-    ).shift(box.localToGlobal(Offset.zero));
+    ).shift(bounds.topLeft);
   }
 
-  /// Maps a panel's global rectangle to the pixels of [image] beneath it.
-  /// Returns null where the panel does not overlap the picture.
+  /// Maps the copy, including its blurred gutter, to the picture's position.
+  /// [viewport] clips the gutter at the actual native composition boundary,
+  /// so an inline player's picture cannot colour the surrounding app page.
   static VideoBackdropMapping? mapping({
     required Rect panel,
     required Rect picture,
     required Size image,
+    Rect? contentRect,
+    Rect? viewport,
   }) {
-    final overlap = panel.intersect(picture);
-    if (overlap.isEmpty || picture.isEmpty || image.isEmpty) return null;
-    final sx = image.width / picture.width, sy = image.height / picture.height;
+    final content = contentRect ?? Offset.zero & image;
+    if (picture.isEmpty ||
+        image.isEmpty ||
+        content.isEmpty ||
+        content.left < 0 ||
+        content.top < 0 ||
+        content.right > image.width ||
+        content.bottom > image.height) {
+      return null;
+    }
+    final sx = picture.width / content.width,
+        sy = picture.height / content.height;
+    final extendedPicture = Rect.fromLTRB(
+      picture.left - content.left * sx,
+      picture.top - content.top * sy,
+      picture.right + (image.width - content.right) * sx,
+      picture.bottom + (image.height - content.bottom) * sy,
+    );
+    var overlap = panel.intersect(extendedPicture);
+    if (viewport != null) overlap = overlap.intersect(viewport);
+    if (overlap.isEmpty) return null;
     return VideoBackdropMapping(
       Rect.fromLTRB(
-        (overlap.left - picture.left) * sx,
-        (overlap.top - picture.top) * sy,
-        (overlap.right - picture.left) * sx,
-        (overlap.bottom - picture.top) * sy,
+        (overlap.left - picture.left) / sx + content.left,
+        (overlap.top - picture.top) / sy + content.top,
+        (overlap.right - picture.left) / sx + content.left,
+        (overlap.bottom - picture.top) / sy + content.top,
       ),
       overlap.shift(-panel.topLeft),
     );

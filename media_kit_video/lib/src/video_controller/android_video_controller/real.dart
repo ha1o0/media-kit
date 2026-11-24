@@ -8,6 +8,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
 import 'package:media_kit_video/src/utils/android_video_output.dart';
+import 'package:media_kit_video/src/utils/video_backdrop_message.dart';
 import 'dart:collection';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
@@ -65,7 +66,12 @@ class AndroidVideoController extends PlatformVideoController {
   String _lastOutputSummary = '';
 
   int _backdropConsumers = 0;
+  int _backdropDecodeGeneration = 0;
   ui.Image? _retiredBackdrop;
+  VideoBackdropFrame? _backdropFrame;
+
+  @override
+  VideoBackdropFrame? get backdropFrame => _backdropFrame;
 
   @override
   void retainBackdrop() {
@@ -78,6 +84,7 @@ class AndroidVideoController extends PlatformVideoController {
   void releaseBackdrop() {
     if (_backdropConsumers == 0) return;
     if (--_backdropConsumers == 0 && !_disposed) {
+      _backdropDecodeGeneration++;
       unawaited(_setBackdropSampling(false));
     }
   }
@@ -98,8 +105,10 @@ class AndroidVideoController extends PlatformVideoController {
     }
   }
 
-  void _acceptBackdrop(ui.Image image) {
-    if (_disposed || _backdropConsumers == 0) {
+  void _acceptBackdrop(ui.Image image, ui.Rect contentRect, int generation) {
+    if (_disposed ||
+        _backdropConsumers == 0 ||
+        generation != _backdropDecodeGeneration) {
       image.dispose();
       return;
     }
@@ -107,6 +116,7 @@ class AndroidVideoController extends PlatformVideoController {
     // Keep the replaced copy alive until the one after it arrives.
     _retiredBackdrop?.dispose();
     _retiredBackdrop = backdrop.value;
+    _backdropFrame = VideoBackdropFrame(image, contentRect);
     backdrop.value = image;
   }
 
@@ -417,6 +427,8 @@ class AndroidVideoController extends PlatformVideoController {
     final handle = await player.handle;
     _controllers.remove(handle);
     _backdropConsumers = 0;
+    _backdropDecodeGeneration++;
+    _backdropFrame = null;
     _retiredBackdrop?.dispose();
     _retiredBackdrop = null;
     await _channel.invokeMethod(
@@ -431,27 +443,26 @@ class AndroidVideoController extends PlatformVideoController {
   /// Currently created [AndroidVideoController]s.
   static final _controllers = HashMap<int, AndroidVideoController>();
 
-  /// Decodes `[handle: int64][width: int32][height: int32][rgba rows]`.
+  /// Accepts legacy copies and copies with a versioned picture/gutter header.
   static void _onBackdropMessage(ByteData message) {
-    const header = 16;
-    if (message.lengthInBytes < header) return;
-    final handle = message.getInt64(0, Endian.host);
-    final width = message.getInt32(8, Endian.host);
-    final height = message.getInt32(12, Endian.host);
-    final controller = _controllers[handle];
+    final copy = VideoBackdropMessage.parse(message);
+    if (copy == null) return;
+    final controller = _controllers[copy.handle];
     if (controller == null ||
         controller._disposed ||
-        controller._backdropConsumers == 0 ||
-        width <= 0 ||
-        height <= 0 ||
-        message.lengthInBytes != header + width * height * 4) {
+        controller._backdropConsumers == 0) {
       return;
     }
     // The platform buffer is only valid during this call.
-    final pixels = Uint8List.fromList(message.buffer.asUint8List(
-        message.offsetInBytes + header, width * height * 4));
-    ui.decodeImageFromPixels(pixels, width, height, ui.PixelFormat.rgba8888,
-        controller._acceptBackdrop);
+    final pixels = Uint8List.fromList(copy.pixels);
+    final generation = ++controller._backdropDecodeGeneration;
+    ui.decodeImageFromPixels(
+        pixels,
+        copy.width,
+        copy.height,
+        ui.PixelFormat.rgba8888,
+        (image) =>
+            controller._acceptBackdrop(image, copy.contentRect, generation));
   }
 
   static bool _backdropChannelReady = false;

@@ -10,6 +10,7 @@ import android.view.Surface;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 
 /**
  * Small pre-blurred copies of the surface mpv renders to, for Flutter panels
@@ -24,17 +25,26 @@ final class VideoBackdropSampler {
     interface Sink {
         /**
          * Called on the main thread. The direct buffer starts with
-         * {@link #HEADER_BYTES} reserved for the receiver, followed by tightly
-         * packed opaque RGBA rows, and is positioned at its end.
+         * the handle/dimensions prefix reserved for the receiver and an
+         * extended header describing the picture within its blurred black
+         * gutter, followed by opaque RGBA rows. Positioned at its end.
          */
         void onBackdrop(int width, int height, ByteBuffer message);
     }
 
-    static final int HEADER_BYTES = 16;
+    static final int HEADER_BYTES = 40;
+    static final int HEADER_MAGIC = 0x42474432; // BGD2
+    static final int HEADER_VERSION = 2;
 
     /** Long edge read from the surface, and the factor it is reduced by. */
     private static final int COPY_LONG_EDGE = 384;
     private static final int REDUCTION = 4;
+    private static final int BLUR_RADIUS = 2;
+    private static final int BLUR_PASSES = 3;
+    // Include the complete convolution support, so video-to-letterbox blur
+    // fades to black instead of being clipped at the picture's edge.
+    static final int PADDING = BLUR_RADIUS * BLUR_PASSES;
+    private static final int PICTURE_LONG_EDGE = COPY_LONG_EDGE / REDUCTION - 2 * PADDING;
     private static final long INTERVAL_MS = 80;
     private static final long IDLE_INTERVAL_MS = 400;
     private static final long FAILURE_INTERVAL_MS = 1000;
@@ -54,10 +64,12 @@ final class VideoBackdropSampler {
     // Worker thread only.
     private Bitmap copy;
     private int[] pixels;
-    private int[] channels, scratch;
+    private int[] reduced, channels, scratch;
     private int lastHash;
     private boolean hasLast;
     private int unchanged;
+    private boolean hasSuccessfulCopy;
+    private int initialNoDataRetries;
 
     VideoBackdropSampler(Sink sink) {
         this.sink = sink;
@@ -100,6 +112,8 @@ final class VideoBackdropSampler {
         worker.post(() -> {
             hasLast = false;
             unchanged = 0;
+            hasSuccessfulCopy = false;
+            initialNoDataRetries = 0;
             capture(current);
         });
     }
@@ -128,29 +142,43 @@ final class VideoBackdropSampler {
             schedule(current, FAILURE_INTERVAL_MS);
             return;
         }
-        final double scale = (double) COPY_LONG_EDGE / Math.max(width, height);
-        final int outWidth = Math.max(2, (int) Math.round(width * scale / REDUCTION));
-        final int outHeight = Math.max(2, (int) Math.round(height * scale / REDUCTION));
+        // The gutter shares the existing 96px output budget with the picture.
+        final double scale = (double) PICTURE_LONG_EDGE / Math.max(width, height);
+        final int outWidth = Math.max(2, (int) Math.round(width * scale));
+        final int outHeight = Math.max(2, (int) Math.round(height * scale));
         final int copyWidth = outWidth * REDUCTION, copyHeight = outHeight * REDUCTION;
         if (copy == null || copy.getWidth() != copyWidth || copy.getHeight() != copyHeight) {
             copy = Bitmap.createBitmap(copyWidth, copyHeight, Bitmap.Config.ARGB_8888);
             pixels = new int[copyWidth * copyHeight];
-            channels = new int[outWidth * outHeight * 3];
-            scratch = new int[outWidth * outHeight * 3];
+            reduced = new int[outWidth * outHeight * 3];
+            channels = new int[(outWidth + 2 * PADDING) * (outHeight + 2 * PADDING) * 3];
+            scratch = new int[channels.length];
             hasLast = false;
         }
         try {
             PixelCopy.request(source, copy, result -> {
+                synchronized (VideoBackdropSampler.this) {
+                    if (current != generation || !enabled || disposed) return;
+                }
                 if (result != PixelCopy.SUCCESS) {
-                    schedule(current, FAILURE_INTERVAL_MS);
+                    final long delay = copyFailureDelay(result, hasSuccessfulCopy, initialNoDataRetries);
+                    if (delay == INTERVAL_MS) initialNoDataRetries++;
+                    schedule(current, delay);
                     return;
                 }
+                hasSuccessfulCopy = true;
                 publish(current, outWidth, outHeight);
             }, handler);
         } catch (IllegalArgumentException | IllegalStateException released) {
             // The surface went away between the validity check and the request.
             schedule(current, FAILURE_INTERVAL_MS);
         }
+    }
+
+    /** A Surface can be valid before its first video frame has arrived. */
+    static long copyFailureDelay(int result, boolean hasSuccessfulCopy, int initialNoDataRetries) {
+        return result == PixelCopy.ERROR_SOURCE_NO_DATA && !hasSuccessfulCopy && initialNoDataRetries < 4
+                ? INTERVAL_MS : FAILURE_INTERVAL_MS;
     }
 
     private void publish(int current, int width, int height) {
@@ -161,20 +189,13 @@ final class VideoBackdropSampler {
         if (copy == null || copy.getWidth() != width * REDUCTION
                 || copy.getHeight() != height * REDUCTION) return;
         copy.getPixels(pixels, 0, copy.getWidth(), 0, 0, copy.getWidth(), copy.getHeight());
-        reduce(pixels, copy.getWidth(), channels, width, height, REDUCTION);
-        // Three box passes approximate a Gaussian with sigma about 2.4 pixels,
-        // which also band-limits the image for bilinear enlargement.
-        for (int pass = 0; pass < 3; pass++) {
-            blurRows(channels, scratch, width, height, 2);
-            blurColumns(scratch, channels, width, height, 2);
-        }
-        final ByteBuffer rgba = ByteBuffer.allocateDirect(HEADER_BYTES + width * height * 4)
-                .order(ByteOrder.nativeOrder());
-        rgba.position(HEADER_BYTES);
+        reduce(pixels, copy.getWidth(), reduced, width, height, REDUCTION);
+        blurWithBlackGutter(reduced, channels, scratch, width, height);
+        final int paddedWidth = width + 2 * PADDING, paddedHeight = height + 2 * PADDING;
+        final ByteBuffer rgba = encode(channels, width, height);
         int hash = 17;
-        for (int i = 0, n = width * height; i < n; i++) {
+        for (int i = 0, n = paddedWidth * paddedHeight; i < n; i++) {
             final int r = channels[i * 3], g = channels[i * 3 + 1], b = channels[i * 3 + 2];
-            rgba.put((byte) r).put((byte) g).put((byte) b).put((byte) 0xFF);
             hash = 31 * hash + ((r << 16) | (g << 8) | b);
         }
         // A paused or static picture needs neither a new image nor this rate.
@@ -190,9 +211,41 @@ final class VideoBackdropSampler {
             synchronized (VideoBackdropSampler.this) {
                 if (current != generation || !enabled || disposed) return;
             }
-            sink.onBackdrop(width, height, rgba);
+            sink.onBackdrop(paddedWidth, paddedHeight, rgba);
         });
         schedule(current, INTERVAL_MS);
+    }
+
+    /** Black bars are part of the blur input, not added after filtering. */
+    static void blurWithBlackGutter(int[] picture, int[] output, int[] temporary,
+            int width, int height) {
+        final int paddedWidth = width + 2 * PADDING, paddedHeight = height + 2 * PADDING;
+        Arrays.fill(output, 0);
+        for (int y = 0; y < height; y++) {
+            System.arraycopy(picture, y * width * 3, output,
+                    ((y + PADDING) * paddedWidth + PADDING) * 3, width * 3);
+        }
+        // Three box passes approximate a Gaussian (sigma about 2.4 pixels).
+        for (int pass = 0; pass < BLUR_PASSES; pass++) {
+            blurRows(output, temporary, paddedWidth, paddedHeight, BLUR_RADIUS);
+            blurColumns(temporary, output, paddedWidth, paddedHeight, BLUR_RADIUS);
+        }
+    }
+
+    /** The legacy prefix stays intact; the picture rect travels with pixels. */
+    static ByteBuffer encode(int[] rgb, int pictureWidth, int pictureHeight) {
+        final int width = pictureWidth + 2 * PADDING, height = pictureHeight + 2 * PADDING;
+        final ByteBuffer rgba = ByteBuffer.allocateDirect(HEADER_BYTES + width * height * 4)
+                .order(ByteOrder.nativeOrder());
+        rgba.putInt(16, HEADER_MAGIC).putInt(20, HEADER_VERSION)
+                .putInt(24, PADDING).putInt(28, PADDING)
+                .putInt(32, pictureWidth).putInt(36, pictureHeight);
+        rgba.position(HEADER_BYTES);
+        for (int i = 0, n = width * height; i < n; i++) {
+            rgba.put((byte) rgb[i * 3]).put((byte) rgb[i * 3 + 1])
+                    .put((byte) rgb[i * 3 + 2]).put((byte) 0xFF);
+        }
+        return rgba;
     }
 
     /** Area average: every copied pixel contributes, so detail does not alias. */

@@ -50,6 +50,18 @@ abstract class PlatformVideoController {
   /// that provides one (Android) has delivered its first copy.
   final ValueNotifier<ui.Image?> backdrop = ValueNotifier<ui.Image?>(null);
 
+  /// Pixels and their unpadded picture rectangle, from the same native copy.
+  /// The existing image notifier also supports plugins without gutter metadata.
+  VideoBackdropFrame? get backdropFrame {
+    final image = backdrop.value;
+    return image == null
+        ? null
+        : VideoBackdropFrame(
+            image,
+            Rect.fromLTWH(
+                0, 0, image.width.toDouble(), image.height.toDouble()));
+  }
+
   /// Starts backdrop copies for one more consumer. Balanced by
   /// [releaseBackdrop]; platforms without a backdrop ignore both.
   void retainBackdrop() {}
@@ -102,6 +114,15 @@ abstract class PlatformVideoController {
     backdrop.value?.dispose();
     backdrop.dispose();
   }
+}
+
+/// The picture occupies [contentRect]; the rest of [image] is its blurred
+/// letterbox transition. This object does not own or dispose the image.
+@immutable
+class VideoBackdropFrame {
+  const VideoBackdropFrame(this.image, this.contentRect);
+  final ui.Image image;
+  final Rect contentRect;
 }
 
 /// {@template video_controller_configuration}
