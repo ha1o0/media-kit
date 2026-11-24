@@ -4,6 +4,7 @@
 /// All rights reserved.
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'dart:async';
+import 'dart:ui' as ui;
 import 'package:flutter/widgets.dart';
 
 import 'package:media_kit/media_kit.dart';
@@ -43,6 +44,17 @@ abstract class PlatformVideoController {
 
   /// Actual native output, after display capability and source/target negotiation.
   final ValueNotifier<bool> nativeHdrActive = ValueNotifier<bool>(false);
+
+  /// A small, already blurred copy of the composited video, refreshed a few
+  /// times per second while [retainBackdrop] is held. Null until a platform
+  /// that provides one (Android) has delivered its first copy.
+  final ValueNotifier<ui.Image?> backdrop = ValueNotifier<ui.Image?>(null);
+
+  /// Starts backdrop copies for one more consumer. Balanced by
+  /// [releaseBackdrop]; platforms without a backdrop ignore both.
+  void retainBackdrop() {}
+
+  void releaseBackdrop() {}
 
   /// {@macro platform_video_controller}
   PlatformVideoController(
@@ -87,6 +99,8 @@ abstract class PlatformVideoController {
     rect.dispose();
     nativeHdrActive.dispose();
     androidNativeSurface.dispose();
+    backdrop.value?.dispose();
+    backdrop.dispose();
   }
 }
 

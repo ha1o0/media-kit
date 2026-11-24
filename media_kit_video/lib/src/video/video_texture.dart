@@ -175,6 +175,12 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   late bool _disposeNotifiers;
   final _subtitleViewKey = GlobalKey<SubtitleViewState>();
   final _nativeWindowViewportKey = GlobalKey();
+
+  /// The Android platform view whose native container currently presents this
+  /// video below Flutter, or null while it is drawn as a Flutter texture.
+  /// Sibling native overlays (danmaku) attach to that container.
+  final ValueNotifier<int?> androidNativeViewId = ValueNotifier<int?>(null);
+  bool _androidNativeViewDisposed = false;
   final _wakelock = Wakelock();
   final _subscriptions = <StreamSubscription>[];
   late int? _width = widget.controller.player.state.width;
@@ -501,6 +507,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _androidNativeViewDisposed = true;
+    androidNativeViewId.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _nativeFullscreenParent?._nativeFullscreenOwnershipRevision
         .removeListener(_handleNativeFullscreenOwnershipChanged);
@@ -679,6 +687,16 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                     alignment: parameters.alignment,
                     rotation: parameters.visualRotation,
                     mirror: parameters.visualMirror,
+                    onViewChanged: (view, available) {
+                      if (_androidNativeViewDisposed) return;
+                      if (available) {
+                        androidNativeViewId.value = view;
+                      } else if (androidNativeViewId.value == view) {
+                        // A replaced view reports its end after its successor
+                        // has reported its start; only clear our own id.
+                        androidNativeViewId.value = null;
+                      }
+                    },
                   );
                 },
               ),

@@ -68,6 +68,7 @@ final class HDRMetalSurfaceView: UIView {
         "transform": String(describing: view.transform),
         "children": view.subviews.map { child in
           ["class": String(describing: type(of: child)), "frame": String(describing: child.frame),
+           "interactive": child.isUserInteractionEnabled,
            "children": child.subviews.map { String(describing: type(of: $0)) } ] as [String: Any]
         }])
       current = view.superview
@@ -119,6 +120,7 @@ final class HDRMetalSurfaceView: UIView {
 
   override func didMoveToWindow() {
     super.didMoveToWindow()
+    PlatformViewBackdropTouchRouting.install(for: self)
     updatePresentationEligibility()
     drawFrame()
   }
@@ -266,6 +268,49 @@ final class HDRMetalSurfaceView: UIView {
     default:
       metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
     }
+  }
+}
+
+/// Flutter draws a `BackdropFilter` above a platform view by inserting a
+/// `UIVisualEffectView` sibling over it. Those views accept touches by default,
+/// so a finger on a blurred drawer is owned by the effect view. Flutter reuses
+/// the effect views by index and removes the trailing ones whenever the number
+/// of blurred surfaces drops (controls auto-hiding under an open drawer). UIKit
+/// then ends the touch on a detached view whose responder chain no longer
+/// reaches the Flutter view controller, the pointer is never released, and
+/// every scrollable under it stops settling or bouncing back.
+///
+/// Leaving the effect views non-interactive routes the touch to Flutter's own
+/// intercepting view, which stays mounted for the platform view's lifetime.
+enum PlatformViewBackdropTouchRouting {
+  private static var patchedClasses = Set<ObjectIdentifier>()
+
+  static func install(for platformView: UIView) {
+    guard let container = platformView.superview?.superview else { return }
+    let containerClass: AnyClass = type(of: container)
+    guard NSStringFromClass(containerClass).hasSuffix("ChildClippingView") else { return }
+    for subview in container.subviews { passThrough(subview) }
+    guard patchedClasses.insert(ObjectIdentifier(containerClass)).inserted else { return }
+
+    let selector = #selector(UIView.didAddSubview(_:))
+    guard let inherited = class_getInstanceMethod(containerClass, selector) else { return }
+    typealias Original = @convention(c) (UIView, Selector, UIView) -> Void
+    let original = unsafeBitCast(method_getImplementation(inherited), to: Original.self)
+    let replacement: @convention(block) (UIView, UIView) -> Void = { container, subview in
+      original(container, selector, subview)
+      passThrough(subview)
+    }
+    let implementation = imp_implementationWithBlock(replacement)
+    let encoding = method_getTypeEncoding(inherited)
+    // The engine class inherits UIView's implementation today. Add an override
+    // on that class only; replace in place if a later engine defines its own.
+    if !class_addMethod(containerClass, selector, implementation, encoding) {
+      method_setImplementation(inherited, implementation)
+    }
+  }
+
+  private static func passThrough(_ view: UIView) {
+    if view is UIVisualEffectView { view.isUserInteractionEnabled = false }
   }
 }
 

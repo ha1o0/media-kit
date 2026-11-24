@@ -48,6 +48,7 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
     private final TextureUpdateCallback textureUpdateCallback;
 
     private final TextureRegistry.SurfaceProducer surfaceProducer;
+    private final VideoBackdropSampler backdrop;
 
     private final Object lock = new Object();
     private final ArrayList<HdrVideoPlatformView> nativeViews = new ArrayList<>();
@@ -97,6 +98,7 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
         selectedHeight = height;
         selectedSurface = surface;
         selectedCapabilities = capabilities;
+        backdrop.setSource(surface != null && surface.isValid() ? surface : null, width, height);
         final long oldWid = wid;
         wid = surface != null && surface.isValid() ? newGlobalObjectRef(surface) : 0;
         id = surfaceProducer.id();
@@ -106,8 +108,10 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
     }
 
 
-    VideoOutput(TextureRegistry textureRegistryReference, TextureUpdateCallback textureUpdateCallback) {
+    VideoOutput(TextureRegistry textureRegistryReference, TextureUpdateCallback textureUpdateCallback,
+                VideoBackdropSampler.Sink backdropSink) {
         this.textureUpdateCallback = textureUpdateCallback;
+        backdrop = new VideoBackdropSampler(backdropSink);
 
         surfaceProducer = textureRegistryReference.createSurfaceProducer();
         surfaceProducer.setCallback(this);
@@ -116,6 +120,7 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
     public void dispose() {
         synchronized (lock) {
             disposed = true;
+            backdrop.dispose();
             nativeViews.clear();
             presentingView = null;
             try {
@@ -134,6 +139,10 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
 
     public void setSurfaceSize(int width, int height) {
         setSurfaceSize(width, height, false);
+    }
+
+    void setBackdropSampling(boolean enabled) {
+        backdrop.setEnabled(enabled);
     }
 
     private void setSurfaceSize(int width, int height, boolean force) {
@@ -169,6 +178,7 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
             if (!disposed && presentingView != null) return;
             textureUpdateCallback.onTextureUpdate(id, 0, surfaceProducer.getWidth(), surfaceProducer.getHeight(), false, 0);
             selectedSurface = null;
+            backdrop.setSource(null, 0, 0);
             if (wid != 0) {
                 final long widReference = wid;
                 handler.postDelayed(() -> deleteGlobalObjectRef(widReference), 5000);

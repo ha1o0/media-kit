@@ -50,11 +50,43 @@ struct PictureInPictureFrameHandoff {
 }
 
 enum DecodedPictureInPictureColorPolicy {
+  /// What AVKit may be told about a decoder-owned frame.
+  enum Kind: Equatable { case sdr, pq, hlg }
+
   static func accepts(transfer: String?, primaries: String?) -> Bool {
     // Decoder-owned CVPixelBuffers may omit Core Video transfer attachments.
     // Check mpv's stream metadata too, so an 8-bit HDR surface cannot be
     // mistaken for SDR merely because its pixel format is NV12.
     primaries == "bt.709" && ["bt.1886", "srgb", "gamma2.2", "gamma2.4"].contains(transfer ?? "")
+  }
+
+  /// A raw HDR sample is only correct when the inline player is itself
+  /// presenting HDR (the user did not ask for an SDR mapping) and the decoded
+  /// pixels are ordinary BT.2020 PQ/HLG. Dolby Vision profile 5 decodes to
+  /// IPT-PQ-C2, which needs the RPU reshaping that only libplacebo applies.
+  static func kind(transfer: String?, primaries: String?, matrix: String?,
+                   hdrOutputActive: Bool) -> Kind? {
+    if accepts(transfer: transfer, primaries: primaries) { return .sdr }
+    guard hdrOutputActive, primaries == "bt.2020",
+      let matrix = matrix, matrix.hasPrefix("bt.2020") else { return nil }
+    switch transfer {
+    case "pq", "st2084", "st-2084": return .pq
+    case "hlg", "arib-std-b67": return .hlg
+    default: return nil
+    }
+  }
+}
+
+/// Core Video color tags for frames handed to AVKit. The compositor reads
+/// these, not mpv's metadata, to decide whether a sample is HDR.
+enum PictureInPictureColorTags {
+  /// `colorSpace` uses libmpv's IOSurface target values: 1 = HDR10, 2 = HLG.
+  static func kind(colorSpace: Int32) -> DecodedPictureInPictureColorPolicy.Kind? {
+    switch colorSpace {
+    case 1: return .pq
+    case 2: return .hlg
+    default: return nil
+    }
   }
 }
 

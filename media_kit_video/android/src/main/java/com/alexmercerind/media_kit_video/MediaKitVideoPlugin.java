@@ -13,7 +13,10 @@ import java.util.HashMap;
 import java.util.Map;
 import android.content.Context;
 import android.view.WindowManager;
+import io.flutter.plugin.common.BasicMessageChannel;
+import io.flutter.plugin.common.BinaryCodec;
 import io.flutter.plugin.common.StandardMessageCodec;
+import java.nio.ByteBuffer;
 import io.flutter.plugin.platform.PlatformView;
 import io.flutter.plugin.platform.PlatformViewFactory;
 
@@ -27,7 +30,42 @@ import io.flutter.plugin.common.MethodChannel.Result;
  * MediaKitVideoPlugin
  */
 public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
+    /** The native video container of one platform view, for sibling overlays. */
+    public static final class NativeVideoHost {
+        /** Covers the whole playback viewport, letterbox bars included. */
+        public final android.view.ViewGroup container;
+        /** The video surface inside {@link #container}. */
+        public final android.view.View surface;
+
+        NativeVideoHost(android.view.ViewGroup container, android.view.View surface) {
+            this.container = container;
+            this.surface = surface;
+        }
+    }
+
+    public interface NativeVideoHostListener {
+        /** Called on the main thread before a host's views are torn down. */
+        void onNativeVideoHostDisposed(int viewId);
+    }
+
+    // Main thread only. Platform view ids are unique per Flutter engine; this
+    // app runs a single engine.
+    private static final HashMap<Integer, HdrVideoPlatformView> nativeHosts = new HashMap<>();
+    private static NativeVideoHostListener nativeHostListener;
+
+    /** Resolves a live platform view id reported to Dart, or returns null. */
+    public static NativeVideoHost nativeVideoHost(int viewId) {
+        final HdrVideoPlatformView view = nativeHosts.get(viewId);
+        return view == null ? null
+            : new NativeVideoHost((android.view.ViewGroup) view.getView(), view.view);
+    }
+
+    public static void setNativeVideoHostListener(NativeVideoHostListener listener) {
+        nativeHostListener = listener;
+    }
+
     private MethodChannel channel;
+    private BasicMessageChannel<ByteBuffer> backdropChannel;
     private VideoOutputManager videoOutputManager;
     private Context applicationContext;
     private final HashMap<Integer, HdrVideoPlatformView> hdrViews = new HashMap<>();
@@ -36,6 +74,9 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
     public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
         channel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "com.alexmercerind/media_kit_video");
         channel.setMethodCallHandler(this);
+        // Pixel payloads bypass the method channel and its argument logging.
+        backdropChannel = new BasicMessageChannel<>(flutterPluginBinding.getBinaryMessenger(),
+            "com.alexmercerind/media_kit_video/backdrop", BinaryCodec.INSTANCE_DIRECT);
 
         applicationContext = flutterPluginBinding.getApplicationContext();
         videoOutputManager = new VideoOutputManager(flutterPluginBinding.getTextureRegistry());
@@ -48,8 +89,14 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
                     if (output == null) throw new IllegalStateException("Video output disposed");
                     HdrVideoPlatformView view = new HdrVideoPlatformView(context, output,
                         Boolean.TRUE.equals(parameters.get("fullscreen")), parameters,
-                        () -> hdrViews.remove(id));
+                        () -> {
+                            hdrViews.remove(id);
+                            if (nativeHosts.remove(id) != null && nativeHostListener != null) {
+                                nativeHostListener.onNativeVideoHostDisposed(id);
+                            }
+                        });
                     hdrViews.put(id, view);
+                    nativeHosts.put(id, view);
                     return view;
                 }
             });
@@ -80,7 +127,18 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
                         put("width", width);
                         put("height", height);
                     }});
-                }}));
+                }}), (width, height, message) -> {
+                    final BasicMessageChannel<ByteBuffer> target = backdropChannel;
+                    if (target == null) return;
+                    message.putLong(0, handle).putInt(8, width).putInt(12, height);
+                    target.send(message);
+                });
+                result.success(null);
+                break;
+            }
+            case "VideoOutputManager.SetBackdropSampling": {
+                final long handle = Long.parseLong(call.argument("handle"));
+                videoOutputManager.setBackdropSampling(handle, Boolean.TRUE.equals(call.argument("enabled")));
                 result.success(null);
                 break;
             }
@@ -117,6 +175,7 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
     @Override
     public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
         channel.setMethodCallHandler(null);
+        backdropChannel = null;
         hdrViews.clear();
     }
 }

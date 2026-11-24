@@ -6,6 +6,7 @@
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' as ui;
 import 'package:media_kit_video/src/utils/android_video_output.dart';
 import 'dart:collection';
 import 'package:flutter/services.dart';
@@ -62,6 +63,52 @@ class AndroidVideoController extends PlatformVideoController {
   bool _nativeSurfaceFailed = false;
   StreamSubscription<PlayerLog>? _renderLogSubscription;
   String _lastOutputSummary = '';
+
+  int _backdropConsumers = 0;
+  ui.Image? _retiredBackdrop;
+
+  @override
+  void retainBackdrop() {
+    if (_disposed) return;
+    _ensureBackdropChannel();
+    if (_backdropConsumers++ == 0) unawaited(_setBackdropSampling(true));
+  }
+
+  @override
+  void releaseBackdrop() {
+    if (_backdropConsumers == 0) return;
+    if (--_backdropConsumers == 0 && !_disposed) {
+      unawaited(_setBackdropSampling(false));
+    }
+  }
+
+  Future<void> _setBackdropSampling(bool enabled) async {
+    try {
+      final handle = await player.handle;
+      // A release can overtake the handle lookup of the matching retain.
+      if (_disposed || enabled != (_backdropConsumers > 0)) return;
+      await _channel.invokeMethod('VideoOutputManager.SetBackdropSampling', {
+        'handle': handle.toString(),
+        'enabled': enabled,
+      });
+    } on MissingPluginException {
+      // An older embedding keeps the consumer's opaque fallback.
+    } on PlatformException catch (error) {
+      debugPrint('Video backdrop sampling unavailable: $error');
+    }
+  }
+
+  void _acceptBackdrop(ui.Image image) {
+    if (_disposed || _backdropConsumers == 0) {
+      image.dispose();
+      return;
+    }
+    // A panel may still be painting the image it read during this frame.
+    // Keep the replaced copy alive until the one after it arrives.
+    _retiredBackdrop?.dispose();
+    _retiredBackdrop = backdrop.value;
+    backdrop.value = image;
+  }
 
   Future<void> _onTargetChanged(String value) async {
     if (_disposed) return;
@@ -369,6 +416,9 @@ class AndroidVideoController extends PlatformVideoController {
     await _renderLogSubscription?.cancel();
     final handle = await player.handle;
     _controllers.remove(handle);
+    _backdropConsumers = 0;
+    _retiredBackdrop?.dispose();
+    _retiredBackdrop = null;
     await _channel.invokeMethod(
       'VideoOutputManager.Dispose',
       {
@@ -380,6 +430,46 @@ class AndroidVideoController extends PlatformVideoController {
 
   /// Currently created [AndroidVideoController]s.
   static final _controllers = HashMap<int, AndroidVideoController>();
+
+  /// Decodes `[handle: int64][width: int32][height: int32][rgba rows]`.
+  static void _onBackdropMessage(ByteData message) {
+    const header = 16;
+    if (message.lengthInBytes < header) return;
+    final handle = message.getInt64(0, Endian.host);
+    final width = message.getInt32(8, Endian.host);
+    final height = message.getInt32(12, Endian.host);
+    final controller = _controllers[handle];
+    if (controller == null ||
+        controller._disposed ||
+        controller._backdropConsumers == 0 ||
+        width <= 0 ||
+        height <= 0 ||
+        message.lengthInBytes != header + width * height * 4) {
+      return;
+    }
+    // The platform buffer is only valid during this call.
+    final pixels = Uint8List.fromList(message.buffer.asUint8List(
+        message.offsetInBytes + header, width * height * 4));
+    ui.decodeImageFromPixels(pixels, width, height, ui.PixelFormat.rgba8888,
+        controller._acceptBackdrop);
+  }
+
+  static bool _backdropChannelReady = false;
+
+  static void _ensureBackdropChannel() {
+    if (_backdropChannelReady) return;
+    _backdropChannelReady = true;
+    const BasicMessageChannel<ByteData?>(
+            'com.alexmercerind/media_kit_video/backdrop', BinaryCodec())
+        .setMessageHandler((message) async {
+      try {
+        if (message != null) _onBackdropMessage(message);
+      } catch (error, stack) {
+        debugPrint('Video backdrop message rejected: $error\n$stack');
+      }
+      return null;
+    });
+  }
 
   /// [MethodChannel] for invoking platform specific native implementation.
   static final _channel = const MethodChannel(

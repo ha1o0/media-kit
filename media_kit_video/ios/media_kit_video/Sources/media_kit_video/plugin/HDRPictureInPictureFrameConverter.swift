@@ -2,8 +2,43 @@ import CoreImage
 import CoreVideo
 import Foundation
 
-/// AVKit's preview receives a bounded SDR copy of the already composited HDR
-/// frame. Keep the inline surface, subtitles, decoder and HDR target intact.
+/// Tags a frame AVKit will present natively. Only the Core Video attachments
+/// change: the pixels, the IOSurface and the inline Metal presentation of the
+/// same buffer are untouched.
+enum HDRPictureInPictureTags {
+  static func apply(_ pixel: CVPixelBuffer, kind: DecodedPictureInPictureColorPolicy.Kind,
+                    yuv: Bool) {
+    guard kind != .sdr, #available(iOS 11.0, macOS 10.13, *) else { return }
+    func set(_ key: CFString, _ value: CFString) {
+      if let current = CVBufferGetAttachment(pixel, key, nil)?.takeUnretainedValue(),
+        CFEqual(current, value) { return }
+      CVBufferSetAttachment(pixel, key, value, .shouldPropagate)
+    }
+    set(kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020)
+    set(kCVImageBufferTransferFunctionKey, kind == .pq
+      ? kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+      : kCVImageBufferTransferFunction_ITU_R_2100_HLG)
+    if yuv { set(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020) }
+  }
+
+  /// Returns a reused target to the untagged SDR contract.
+  static func clear(_ pixel: CVPixelBuffer) {
+    guard CVBufferGetAttachment(pixel, kCVImageBufferTransferFunctionKey, nil) != nil else { return }
+    CVBufferRemoveAttachment(pixel, kCVImageBufferTransferFunctionKey)
+    CVBufferRemoveAttachment(pixel, kCVImageBufferColorPrimariesKey)
+  }
+
+  /// The formats libmpv's HDR paths hand over: VideoToolbox 10-bit 4:2:0 and
+  /// the packed 10-bit target that gpu-next composites subtitles into.
+  static func isDecodedHdrFormat(_ format: OSType) -> Bool {
+    format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+      format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+  }
+}
+
+/// Compatibility path for a system that rejects native HDR samples: AVKit
+/// receives a bounded SDR copy of the already composited HDR frame. Keep the
+/// inline surface, subtitles, decoder and HDR target intact.
 final class HDRPictureInPictureFrameConverter {
   private var context: CIContext?
   private var pool: CVPixelBufferPool?

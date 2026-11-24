@@ -21,7 +21,9 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private var currentFrame: CVPixelBuffer?
   private var pipPool: CVPixelBufferPool?
   private var pipPoolSize = CGSize.zero
-  private var sameContextPipSupport: Bool?
+  /// Highest software composition mode the library reports: 0 none, 1 SDR
+  /// subtitle blending, 2 also maps subtitles into a PQ/HLG frame.
+  private var sameContextPipMode: Int32?
   private var pool: CVPixelBufferPool?
   private var poolSize: CGSize = .zero
   private var poolUsesHdr = false
@@ -29,6 +31,9 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private var renderContext: OpaquePointer?
   private var reportedRenderFailure = false
   private var reportedAllocationFailure = false
+  /// AVKit keeps the composited HDR targets it is still presenting. Allow for
+  /// those holders, so the inline renderer is not starved of a free target.
+  var retainsPictureInPictureFrames = false
 
   init?(handle: OpaquePointer, hdrOutput: Bool = false, updateCallback: @escaping () -> Void) {
     self.mpvHandle = handle
@@ -92,24 +97,35 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
     return (status >= 0, status >= 0 ? pixel : nil)
   }
 
-  var supportsSameContextPictureInPicture: Bool {
-    if let supported = sameContextPipSupport { return supported }
-    guard let renderContext = renderContext else { return false }
+  private var sameContextPictureInPictureMode: Int32 {
+    if let mode = sameContextPipMode { return mode }
+    guard let renderContext = renderContext else { return 0 }
     var supported: Int32 = 0
     let status = withUnsafeMutablePointer(to: &supported) { pointer in
       mpv_render_context_get_info(renderContext, mpv_render_param(
         type: mpv_render_param_type(rawValue: 26), data: UnsafeMutableRawPointer(pointer)))
     }
-    sameContextPipSupport = status >= 0 && supported == 1
-    return sameContextPipSupport == true
+    let mode = status >= 0 ? max(0, supported) : 0
+    sameContextPipMode = mode
+    return mode
   }
+
+  var supportsSameContextPictureInPicture: Bool { sameContextPictureInPictureMode >= 1 }
+
+  /// The software compositor keeps an HDR frame's PQ/HLG code values. Only a
+  /// library that also maps subtitles into that transfer may be tagged as HDR;
+  /// an older one would blend white text at the format's peak.
+  var supportsHdrPictureInPictureComposition: Bool { sameContextPictureInPictureMode >= 2 }
 
   /// Compose subtitles / transformed or software frames on the same decoder.
   /// The private parameter bypasses every primary GPU operation, including
   /// pending reconfiguration. Never send it to a library that failed the probe.
-  func compositedPictureInPictureFrame(_ size: CGSize, deliver: Bool) -> (supported: Bool, pixel: CVPixelBuffer?) {
+  func compositedPictureInPictureFrame(
+    _ size: CGSize, deliver: Bool, hdr: DecodedPictureInPictureColorPolicy.Kind? = nil
+  ) -> (supported: Bool, pixel: CVPixelBuffer?) {
     guard supportsSameContextPictureInPicture, let renderContext = renderContext else { return (false, nil) }
-    var mode: Int32 = 1
+    let hdrKind = hdr != .sdr && supportsHdrPictureInPictureComposition ? hdr : nil
+    var mode: Int32 = hdrKind == nil ? 1 : 2
     var skip: Int32 = 1
     return withUnsafeMutablePointer(to: &mode) { modePointer in
       withUnsafeMutablePointer(to: &skip) { skipPointer in
@@ -158,6 +174,14 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
               ]
               return mpv_render_context_render(renderContext, &params)
             }
+          }
+        }
+        if status >= 0 {
+          // Pooled targets are reused across SDR and HDR sources.
+          if let kind = hdrKind {
+            HDRPictureInPictureTags.apply(frame, kind: kind, yuv: false)
+          } else {
+            HDRPictureInPictureTags.clear(frame)
           }
         }
         return (status >= 0 || status == MPV_ERROR_UNINITIALIZED.rawValue, status >= 0 ? frame : nil)
@@ -282,7 +306,8 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private func allocateFrame() -> CVPixelBuffer? {
     guard poolSize.width > 0, DispatchTime.now() >= nextAllocation else { return nil }
     // Don't reuse a target retained by the Flutter raster thread or PiP.
-    let limits = [kCVPixelBufferPoolAllocationThresholdKey: 4] as CFDictionary
+    let limits = [kCVPixelBufferPoolAllocationThresholdKey:
+      retainsPictureInPictureFrames ? 6 : 4] as CFDictionary
     func allocate() -> (CVReturn, CVPixelBuffer?) {
       guard let pool = pool else { return (kCVReturnAllocationFailed, nil) }
       var frame: CVPixelBuffer?

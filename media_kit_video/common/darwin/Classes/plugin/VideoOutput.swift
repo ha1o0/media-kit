@@ -68,6 +68,10 @@ public class VideoOutput: NSObject {
     private var pipFrameDelivery = false
     private var lastPipPreviewFrame = 0.0
     private var hdrPipFrameConverter: HDRPictureInPictureFrameConverter?
+    // Set once AVKit refuses a native HDR sample; the SDR copy takes over.
+    private var hdrPipRejected = false
+    private var hdrPipRejectionObserver: NSObjectProtocol?
+    private var loggedHdrPipSource = false
     // Platform views can overlap while entering/leaving fullscreen. Keep all
     // live views, and replay the last frame when a paused view is attached.
     // These presentation fields are only accessed on the main thread.
@@ -120,10 +124,30 @@ public class VideoOutput: NSObject {
             that.pendingPipFrame.discard()
             that.pipFrameSource = .undecided
             that.hdrPipFrameConverter?.reset()
+            that.loggedHdrPipSource = false
+            (that.texture as? TextureIOSurface)?.retainsPictureInPictureFrames = false
           }
           that.pipPolicy.presenting = active
           that.updatePictureInPictureRenderer()
           if requestFrame && that.pipPolicy.appIsActive && that.pipFrameDelivery {
+            that.deliverPictureInPictureFrame(force: true)
+          }
+        }
+      }
+
+      hdrPipRejectionObserver = NotificationCenter.default.addObserver(
+        forName: Notification.Name("bota.mobile-pip-hdr-rejected"), object: nil, queue: .main
+      ) { [weak self] event in
+        guard let that = self,
+          event.userInfo?["identity"] as? String == String(Int(bitPattern: that.handle)) else { return }
+        that.worker.enqueue { [weak that] in
+          guard let that = that, !that.disposed, !that.hdrPipRejected else { return }
+          NSLog("VideoOutput: AVKit rejected native HDR PiP samples; using the SDR copy")
+          that.hdrPipRejected = true
+          that.pendingPipFrame.discard()
+          that.pipFrameSource = .undecided
+          (that.texture as? TextureIOSurface)?.retainsPictureInPictureFrames = false
+          if that.pipFrameDelivery && that.pipPolicy.appIsActive {
             that.deliverPictureInPictureFrame(force: true)
           }
         }
@@ -171,6 +195,7 @@ public class VideoOutput: NSObject {
   deinit {
     #if os(iOS)
       if let observer = pipObserver { NotificationCenter.default.removeObserver(observer) }
+      if let observer = hdrPipRejectionObserver { NotificationCenter.default.removeObserver(observer) }
       for observer in lifecycleObservers { NotificationCenter.default.removeObserver(observer) }
     #endif
     worker.cancel()
@@ -245,6 +270,14 @@ public class VideoOutput: NSObject {
         var stats = IOSRenderTiming.summary(self.renderTimes)
         stats["pixelFormat"] = self.inlineTexture.latestFrame.map { CVPixelBufferGetPixelFormatType($0) } ?? 0
         stats["presentation"] = presentation
+        stats["pictureInPicture"] = [
+          "delivery": self.pipFrameDelivery, "presenting": self.pipPolicy.presenting,
+          "draining": self.drainsPictureInPictureFrames,
+          "source": String(describing: self.pipFrameSource),
+          "nativeHdr": self.loggedHdrPipSource, "hdrRejected": self.hdrPipRejected,
+          "hdrComposition":
+            (self.texture as? TextureIOSurface)?.supportsHdrPictureInPictureComposition ?? false,
+        ] as [String: Any]
         stats["views"] = views
         if reset { self.renderTimes.removeAll(keepingCapacity: true) }
         DispatchQueue.main.async { completion(stats) }
@@ -524,39 +557,63 @@ public class VideoOutput: NSObject {
   }
 
   #if os(iOS)
-    private func permitsDecodedPictureInPicture() -> Bool {
-      guard renderBackend == "iosurface+decoded-pip" || usesHdrSurface else { return false }
+    /// The kind of raw decoder sample AVKit may present, or nil when the
+    /// picture needs mpv's compositor (subtitles, equalizer, geometry, DV P5).
+    private func decodedPictureInPictureKind() -> DecodedPictureInPictureColorPolicy.Kind? {
+      guard renderBackend == "iosurface+decoded-pip" || usesHdrSurface else { return nil }
       // A direct sample is before mpv's OSD and output transform.
       for property in ["sid", "secondary-sid"] {
-        guard let selected = mpv_get_property_string(handle, property) else { return false }
+        guard let selected = mpv_get_property_string(handle, property) else { return nil }
         let disabled = String(cString: selected) == "no"
         mpv_free(selected)
-        if !disabled { return false }
+        if !disabled { return nil }
       }
       for property in ["brightness", "contrast", "gamma", "hue", "saturation", "video-zoom", "panscan"] {
         var value = 0.0
-        guard mpv_get_property(handle, property, MPV_FORMAT_DOUBLE, &value) >= 0, value == 0 else { return false }
+        guard mpv_get_property(handle, property, MPV_FORMAT_DOUBLE, &value) >= 0, value == 0 else { return nil }
       }
       func videoParameter(_ property: String) -> String? {
         guard let value = mpv_get_property_string(handle, "video-out-params/\(property)") else { return nil }
         defer { mpv_free(value) }
-        return String(cString: value)
+        return String(cString: value).lowercased()
       }
-      guard DecodedPictureInPictureColorPolicy.accepts(
-        transfer: videoParameter("gamma"), primaries: videoParameter("primaries")) else { return false }
-      return MPVHelpers.getVideoOutParams(handle).rotate == 0
+      // The inline target records what the user is actually being shown; an
+      // HDR source mapped to SDR must stay mapped in the system window too.
+      let hdrOutputActive = usesHdrSurface && !hdrPipRejected &&
+        ((texture as? TextureIOSurface)?.currentColorSpace ?? 0) != 0
+      guard let kind = DecodedPictureInPictureColorPolicy.kind(
+        transfer: videoParameter("gamma"), primaries: videoParameter("primaries"),
+        matrix: videoParameter("colormatrix"), hdrOutputActive: hdrOutputActive),
+        MPVHelpers.getVideoOutParams(handle).rotate == 0 else { return nil }
+      return kind
     }
 
-    private func isSupportedDecodedPictureInPictureFrame(_ pixel: CVPixelBuffer) -> Bool {
-      // Keep HDR on the existing composited PiP color policy.
+    /// The transfer to present a software-composited frame with, while the
+    /// inline player is showing HDR. Subtitles are then mapped by libmpv.
+    private func compositedHdrPictureInPictureKind() -> DecodedPictureInPictureColorPolicy.Kind? {
+      guard usesHdrSurface, !hdrPipRejected, let renderer = texture as? TextureIOSurface,
+        renderer.supportsHdrPictureInPictureComposition,
+        let kind = PictureInPictureColorTags.kind(colorSpace: renderer.currentColorSpace),
+        let matrix = mpv_get_property_string(handle, "video-out-params/colormatrix") else { return nil }
+      defer { mpv_free(matrix) }
+      // Dolby Vision profile 5 needs the GPU path's reshaping to be correct.
+      return String(cString: matrix).lowercased().hasPrefix("bt.2020") ? kind : nil
+    }
+
+    private func isSupportedDecodedPictureInPictureFrame(
+      _ pixel: CVPixelBuffer, kind: DecodedPictureInPictureColorPolicy.Kind) -> Bool {
       let format = CVPixelBufferGetPixelFormatType(pixel)
-      guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
-        format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else { return false }
-      if #available(iOS 11.0, *),
-        let transfer = CVBufferGetAttachment(pixel, kCVImageBufferTransferFunctionKey, nil)?.takeUnretainedValue(),
-        CFEqual(transfer, kCVImageBufferTransferFunction_ITU_R_2100_HLG) ||
-          CFEqual(transfer, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) {
-        return false
+      if kind == .sdr {
+        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+          format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else { return false }
+        if #available(iOS 11.0, *),
+          let transfer = CVBufferGetAttachment(pixel, kCVImageBufferTransferFunctionKey, nil)?.takeUnretainedValue(),
+          CFEqual(transfer, kCVImageBufferTransferFunction_ITU_R_2100_HLG) ||
+            CFEqual(transfer, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) {
+          return false
+        }
+      } else {
+        guard HDRPictureInPictureTags.isDecodedHdrFormat(format) else { return false }
       }
       let width = CVPixelBufferGetWidth(pixel), height = CVPixelBufferGetHeight(pixel)
       guard height > 0, displayedSize.width > 0, displayedSize.height > 0 else { return false }
@@ -566,19 +623,21 @@ public class VideoOutput: NSObject {
 
     private func drainPictureInPictureFrame() {
       guard let renderer = texture as? TextureIOSurface else { return }
-      if pipFrameDelivery, permitsDecodedPictureInPicture(),
+      if pipFrameDelivery, let kind = decodedPictureInPictureKind(),
         let peek = renderer.decodedPictureInPictureFrame(dequeue: false).pixel,
-        isSupportedDecodedPictureInPictureFrame(peek) {
+        isSupportedDecodedPictureInPictureFrame(peek, kind: kind) {
         let next = renderer.decodedPictureInPictureFrame(dequeue: true)
         if next.supported {
-          if let frame = next.pixel, isSupportedDecodedPictureInPictureFrame(frame) {
+          if let frame = next.pixel, isSupportedDecodedPictureInPictureFrame(frame, kind: kind) {
             pipFrameSource = .decoded
-            enqueuePictureInPictureFrame(frame, handoff: false)
+            enqueueDecodedPictureInPictureFrame(frame, kind: kind, handoff: false)
           } else if next.pixel != nil {
             // A format switch was consumed on this callback. Compose the
             // current frame without restarting the decoder or dropping text.
-            let composed = renderer.compositedPictureInPictureFrame(videoSize, deliver: true)
+            let hdr = compositedHdrPictureInPictureKind()
+            let composed = renderer.compositedPictureInPictureFrame(videoSize, deliver: true, hdr: hdr)
             if let frame = composed.pixel {
+              if let hdr = hdr { logHdrPictureInPictureSource("software compositor", kind: hdr) }
               pipFrameSource = .composited
               enqueuePictureInPictureFrame(frame, handoff: false)
             }
@@ -586,8 +645,10 @@ public class VideoOutput: NSObject {
           return
         }
       }
-      let next = renderer.compositedPictureInPictureFrame(videoSize, deliver: pipFrameDelivery)
+      let hdr = compositedHdrPictureInPictureKind()
+      let next = renderer.compositedPictureInPictureFrame(videoSize, deliver: pipFrameDelivery, hdr: hdr)
       if let frame = next.pixel {
+        if let hdr = hdr { logHdrPictureInPictureSource("software compositor", kind: hdr) }
         pipFrameSource = .composited
         enqueuePictureInPictureFrame(frame, handoff: false)
       } else if !next.supported {
@@ -633,20 +694,32 @@ public class VideoOutput: NSObject {
       let previewTime = CFAbsoluteTimeGetCurrent()
       guard pipFrameDelivery, force || pipPolicy.presenting || previewTime - lastPipPreviewFrame >= 0.5,
         let pixel = inlineTexture.latestFrame else { return }
-      if permitsDecodedPictureInPicture() {
+      if let kind = decodedPictureInPictureKind() {
         if let renderer = texture as? TextureIOSurface,
           let decoded = renderer.decodedPictureInPictureFrame(dequeue: false).pixel,
-          isSupportedDecodedPictureInPictureFrame(decoded) {
+          isSupportedDecodedPictureInPictureFrame(decoded, kind: kind) {
           if pipFrameSource != .decoded { NSLog("VideoOutput: PiP using decoder-owned VideoToolbox frames") }
           pipFrameSource = .decoded
           lastPipPreviewFrame = previewTime
-          enqueuePictureInPictureFrame(decoded, handoff: handoff)
+          enqueueDecodedPictureInPictureFrame(decoded, kind: kind, handoff: handoff)
           return
         }
       }
       pipFrameSource = .composited
       if CVPixelBufferGetPixelFormatType(pixel) != kCVPixelFormatType_32BGRA {
         guard let renderer = texture as? TextureIOSurface else { return }
+        // The inline HDR target already holds video, ASS and bitmap subtitles
+        // in PQ/HLG. Hand AVKit that same IOSurface instead of an SDR copy.
+        if !hdrPipRejected,
+          CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_ARGB2101010LEPacked,
+          let kind = PictureInPictureColorTags.kind(colorSpace: renderer.currentColorSpace) {
+          HDRPictureInPictureTags.apply(pixel, kind: kind, yuv: false)
+          renderer.retainsPictureInPictureFrames = true
+          logHdrPictureInPictureSource("composited 10-bit target", kind: kind)
+          lastPipPreviewFrame = previewTime
+          enqueuePictureInPictureFrame(pixel, handoff: handoff)
+          return
+        }
         if hdrPipFrameConverter == nil {
           hdrPipFrameConverter = HDRPictureInPictureFrameConverter()
         }
@@ -695,6 +768,24 @@ public class VideoOutput: NSObject {
       CVPixelBufferUnlockBaseAddress(copy, [])
       guard converted else { return }
       enqueuePictureInPictureFrame(copy, handoff: handoff)
+    }
+
+    private func logHdrPictureInPictureSource(_ source: String,
+                                              kind: DecodedPictureInPictureColorPolicy.Kind) {
+      guard !loggedHdrPipSource else { return }
+      loggedHdrPipSource = true
+      NSLog("VideoOutput: PiP presenting native %@ from the %@", kind == .pq ? "HDR10" : "HLG", source)
+    }
+
+    private func enqueueDecodedPictureInPictureFrame(
+      _ pixel: CVPixelBuffer, kind: DecodedPictureInPictureColorPolicy.Kind, handoff: Bool) {
+      if kind != .sdr {
+        // VideoToolbox can leave the transfer attachment off when the stream
+        // carries it only in the container; AVKit would then show HDR as SDR.
+        HDRPictureInPictureTags.apply(pixel, kind: kind, yuv: true)
+        logHdrPictureInPictureSource("VideoToolbox decoder", kind: kind)
+      }
+      enqueuePictureInPictureFrame(pixel, handoff: handoff)
     }
 
     private func enqueuePictureInPictureFrame(_ pixel: CVPixelBuffer, handoff: Bool) {

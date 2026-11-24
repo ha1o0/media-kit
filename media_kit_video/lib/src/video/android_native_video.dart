@@ -16,7 +16,8 @@ class AndroidNativeVideo extends StatefulWidget {
       required this.fit,
       required this.alignment,
       required this.rotation,
-      required this.mirror});
+      required this.mirror,
+      this.onViewChanged});
 
   final int textureId;
   final bool fullscreen;
@@ -25,6 +26,10 @@ class AndroidNativeVideo extends StatefulWidget {
   final Alignment alignment;
   final int rotation;
   final bool mirror;
+
+  /// Reports the platform view id once its native container exists (true)
+  /// and when it is going away (false). Never called during a build.
+  final void Function(int viewId, bool available)? onViewChanged;
 
   @override
   State<AndroidNativeVideo> createState() => _AndroidNativeVideoState();
@@ -36,6 +41,17 @@ class _AndroidNativeVideoState extends State<AndroidNativeVideo> {
   Map<String, Object>? _layout;
   Map<String, Object>? _sent;
   bool _scheduled = false;
+
+  @override
+  void dispose() {
+    final report = widget.onViewChanged;
+    final view = _viewId;
+    if (view != null && report != null) {
+      // Listeners may rebuild; the element tree is locked during disposal.
+      scheduleMicrotask(() => report(view, false));
+    }
+    super.dispose();
+  }
 
   void _scheduleLayout() {
     if (_scheduled) return;
@@ -104,6 +120,7 @@ class _AndroidNativeVideoState extends State<AndroidNativeVideo> {
               params.onPlatformViewCreated(id);
               if (!mounted) return;
               _viewId = id;
+              widget.onViewChanged?.call(id, true);
               _scheduleLayout();
             });
             controller.create();

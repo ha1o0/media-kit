@@ -26,11 +26,12 @@ public class VideoOutputManager {
         this.textureRegistryReference = textureRegistryReference;
     }
 
-    public void create(long handle, TextureUpdateCallback textureUpdateCallback) {
+    public void create(long handle, TextureUpdateCallback textureUpdateCallback,
+                       VideoBackdropSampler.Sink backdropSink) {
         synchronized (lock) {
             Log.i(TAG, String.format(Locale.ENGLISH, "com.alexmercerind.media_kit_video.VideoOutputManager.create: %d", handle));
             if (!videoOutputs.containsKey(handle)) {
-                final VideoOutput videoOutput = new VideoOutput(textureRegistryReference, textureUpdateCallback);
+                final VideoOutput videoOutput = new VideoOutput(textureRegistryReference, textureUpdateCallback, backdropSink);
                 videoOutputs.put(handle, videoOutput);
             }
         }
@@ -50,6 +51,13 @@ public class VideoOutputManager {
                 Objects.requireNonNull(videoOutputs.get(handle)).dispose();
                 videoOutputs.remove(handle);
             }
+        }
+    }
+
+    public void setBackdropSampling(long handle, boolean enabled) {
+        synchronized (lock) {
+            final VideoOutput output = videoOutputs.get(handle);
+            if (output != null) output.setBackdropSampling(enabled);
         }
     }
 
