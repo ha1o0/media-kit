@@ -28,8 +28,11 @@ final class HDRMetalSurfaceView: UIView {
   private var submitTimes: [Double] = []
   private var gpuTimes: [Double] = []
   var onPresentationEligibilityChanged: (() -> Void)?
+  var onDolbyVisionFailure: ((String) -> Void)?
   private var lastPresentationEligibility = false
   private var presentationEnabled = false
+  private var dolbyVisionView: DolbyVisionPassthroughView?
+  var isPresentingDolbyVision: Bool { dolbyVisionView?.isHidden == false }
 
   var isEligibleForPresentation: Bool {
     guard window != nil, bounds.width > 0, bounds.height > 0 else { return false }
@@ -47,6 +50,7 @@ final class HDRMetalSurfaceView: UIView {
       presentationActivity.isActive = false
       pendingFrame.discard()
       currentFrame = nil
+      endDolbyVision()
     }
   }
 
@@ -73,8 +77,25 @@ final class HDRMetalSurfaceView: UIView {
         }])
       current = view.superview
     }
+    let display = displayState()
     return ["ancestors": ancestors, "window": window != nil,
-      "hasFrame": currentFrame != nil, "drawableSize": String(describing: metalLayer.drawableSize)]
+      "hasFrame": currentFrame != nil, "drawableSize": String(describing: metalLayer.drawableSize),
+      "display": display, "dolbyVision": display["dolbyVision"] ?? NSNull()]
+  }
+
+  func displayState() -> [String: Any] {
+    let dolby: [String: Any]? = isPresentingDolbyVision ? dolbyVisionView?.stats() : nil
+    var display: [String: Any] = ["eligible": isEligibleForPresentation && presentationEnabled,
+      "hasFrame": dolby != nil || currentFrame != nil,
+      "frameColorSpace": currentFrame.map { $0.colorSpace as Any } ?? NSNull(),
+      "pixelFormat": currentFrame.map { CVPixelBufferGetPixelFormatType($0.pixel) as Any } ?? NSNull(),
+      "layerColorSpace": metalLayer.colorspace?.name.map { $0 as String } ?? NSNull(),
+      "wantsEDR": NSNull()]
+    if #available(iOS 16.0, *), dolby == nil {
+      display["wantsEDR"] = metalLayer.wantsExtendedDynamicRangeContent
+    }
+    if let dolby = dolby { display["dolbyVision"] = dolby }
+    return display
   }
 
   func renderStats(reset: Bool) -> [String: Any] {
@@ -127,8 +148,43 @@ final class HDRMetalSurfaceView: UIView {
 
   func display(_ pixelBuffer: CVPixelBuffer, colorSpace: Int32,
                minLuminance: Float, maxLuminance: Float) {
+    endDolbyVision()
     currentFrame = (pixelBuffer, colorSpace, minLuminance, maxLuminance)
     drawFrame()
+  }
+
+  /// Present a VideoToolbox frame carrying Dolby Vision metadata through the
+  /// system compositor, with libmpv's OSD/subtitle overlay above it.
+  func displayDolbyVision(video: CVPixelBuffer, overlay: CVPixelBuffer?) {
+    guard presentationEnabled, isEligibleForPresentation,
+      UIApplication.shared.applicationState == .active else { return }
+    let view: DolbyVisionPassthroughView
+    if let existing = dolbyVisionView {
+      view = existing
+    } else {
+      view = DolbyVisionPassthroughView(frame: bounds)
+      view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      view.isHidden = true
+      view.onFailure = { [weak self] reason in self?.onDolbyVisionFailure?(reason) }
+      addSubview(view)
+      dolbyVisionView = view
+    }
+    if view.isHidden {
+      // The opaque view covers the EDR layer; stop presenting into it.
+      presentationActivity.isActive = false
+      pendingFrame.discard()
+      currentFrame = nil
+      view.frame = bounds
+      view.isHidden = false
+      NSLog("HDRMetalSurfaceView: presenting native Dolby Vision")
+    }
+    view.display(video: video, overlay: overlay)
+  }
+
+  func endDolbyVision() {
+    guard let view = dolbyVisionView, !view.isHidden else { return }
+    view.isHidden = true
+    view.clear()
   }
 
   private func drawFrame() {

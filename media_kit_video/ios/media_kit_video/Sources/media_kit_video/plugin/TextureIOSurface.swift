@@ -112,6 +112,71 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
 
   var supportsSameContextPictureInPicture: Bool { sameContextPictureInPictureMode >= 1 }
 
+  private var overlayOnlySupport: Bool?
+
+  /// The library can clear the target and draw only OSD/subtitles
+  /// (MPV_RENDER_PARAM_IOS_OVERLAY_ONLY), so the host presents the decoded
+  /// frame itself. Older libraries return NOT_IMPLEMENTED.
+  var supportsOverlayOnlyRendering: Bool {
+    if let supported = overlayOnlySupport { return supported }
+    guard let renderContext = renderContext else { return false }
+    var supported: Int32 = 0
+    let status = withUnsafeMutablePointer(to: &supported) { pointer in
+      mpv_render_context_get_info(renderContext, mpv_render_param(
+        type: mpv_render_param_type(rawValue: 28), data: UnsafeMutableRawPointer(pointer)))
+    }
+    let result = status >= 0 && supported == 1
+    overlayOnlySupport = result
+    return result
+  }
+
+  /// Native Dolby Vision presentation: consume the next frame with normal
+  /// timing, draw only its OSD/subtitles into a transparent 32BGRA target,
+  /// and return that overlay together with the decoded VideoToolbox frame.
+  func renderDolbyVisionFrame(_ size: CGSize) -> (video: CVPixelBuffer, overlay: CVPixelBuffer)? {
+    guard let renderContext = renderContext, supportsOverlayOnlyRendering else { return nil }
+    if poolUsesHdr {
+      poolUsesHdr = false
+      replacePool(poolSize)
+    }
+    guard let frame = allocateFrame(), let surface = CVPixelBufferGetIOSurface(frame) else {
+      var skip: Int32 = 1
+      withUnsafeMutablePointer(to: &skip) { pointer in
+        var params = [
+          mpv_render_param(type: MPV_RENDER_PARAM_SKIP_RENDERING, data: UnsafeMutableRawPointer(pointer)),
+          mpv_render_param(),
+        ]
+        _ = mpv_render_context_render(renderContext, &params)
+      }
+      return nil
+    }
+    var colorSpace = Int32(MPV_RENDER_IOSURFACE_COLOR_SPACE_SDR.rawValue)
+    var overlayOnly: Int32 = 1
+    let status = withUnsafeMutablePointer(to: &colorSpace) { colorSpacePointer in
+      withUnsafeMutablePointer(to: &overlayOnly) { overlayPointer in
+        var params = [
+          mpv_render_param(type: MPV_RENDER_PARAM_IOSURFACE, data: surface.toOpaque()),
+          mpv_render_param(type: MPV_RENDER_PARAM_IOSURFACE_COLOR_SPACE,
+                           data: UnsafeMutableRawPointer(colorSpacePointer)),
+          mpv_render_param(type: mpv_render_param_type(rawValue: 28),
+                           data: UnsafeMutableRawPointer(overlayPointer)),
+          mpv_render_param(),
+        ]
+        return mpv_render_context_render(renderContext, &params)
+      }
+    }
+    guard status >= 0, let video = decodedPictureInPictureFrame(dequeue: false).pixel else {
+      if status < 0, !reportedRenderFailure {
+        reportedRenderFailure = true
+        NSLog("TextureIOSurface: mpv overlay render failed (%d)", status)
+      }
+      return nil
+    }
+    // The overlay is not a picture of the video: leave `currentFrame` (the
+    // Flutter texture, artwork and PiP source) on the last composited frame.
+    return (video, frame)
+  }
+
   /// The software compositor keeps an HDR frame's PQ/HLG code values. Only a
   /// library that also maps subtitles into that transfer may be tagged as HDR;
   /// an older one would blend white text at the format's peak.
