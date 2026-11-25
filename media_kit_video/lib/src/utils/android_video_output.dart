@@ -11,16 +11,11 @@ String androidVideoOutputForTracks(String configured, Object? tracks,
       : configured;
 }
 
-/// Keep P5/P8 as raw P010 rather than letting Android's external texture sampler
-/// convert its components to RGB before libplacebo can apply Dolby reshaping.
-/// This still uses the hardware decoder; only decoded-frame transport is copied.
-///
-/// That copy moves every decoded picture through system memory and back to the
-/// GPU: about 25 MB per 4K frame and 100 MB per 8K frame. A native HDR surface
-/// shows the HDR10/HLG base layer without any per-frame mapping, so the frames
-/// may stay on the GPU there. They do so when the user chose the performance
-/// decoder, and for pictures larger than 4K, which the copy cannot keep up
-/// with at all. Profile 5 has no such base layer and always needs its planes.
+/// P5/P8 require raw components and per-frame RPU metadata. Prefer GPU transport
+/// at every resolution; the native decoder accepts it only with gpu-next and
+/// GL_EXT_YUV_target, otherwise it tries P010 copy-back before software decoding.
+/// Explicit compatibility/copy modes keep their readable frames. Profile 20
+/// retains its established P010/base-view path.
 String androidHardwareDecoderForTracks(
   String configured,
   String videoOutput,
@@ -43,12 +38,22 @@ String androidHardwareDecoderForTracks(
       }.contains(configured) &&
       (_hasSelectedMappedDolbyVision(tracks) ||
           (nativeHdr && androidTracksHaveHdr(tracks)))) {
+    if (_hasSelectedDolbyVisionProfile(tracks, const {5, 8})) {
+      return const {
+        'auto-copy',
+        'auto-copy-safe',
+        'auto-copy-unsafe',
+        'mediacodec-copy',
+      }.contains(configured)
+          ? 'mediacodec-copy'
+          : 'mediacodec,mediacodec-copy';
+    }
     if (nativeHdr &&
         androidTracksHaveHdr(tracks) &&
-        !_hasSelectedDolbyVisionProfile(tracks, const {5})) {
+        !_hasSelectedDolbyVisionProfile(tracks, const {20})) {
       if (configured == 'mediacodec') return configured;
       if (configured == 'mediacodec,mediacodec-copy' &&
-          _selectedVideoExceeds4k(tracks)) {
+          androidTracksExceedCopyBudget(tracks)) {
         return configured;
       }
     }
@@ -58,6 +63,9 @@ String androidHardwareDecoderForTracks(
 }
 
 bool _hasSelectedMappedDolbyVision(Object? tracks) =>
+    _hasSelectedDolbyVisionProfile(tracks, const {5, 8, 20});
+
+bool androidTracksUseRawDolbyGpu(Object? tracks) =>
     _hasSelectedDolbyVisionProfile(tracks, const {5, 8});
 
 bool _hasSelectedDolbyVisionProfile(Object? tracks, Set<int> profiles) {
@@ -73,7 +81,7 @@ bool _hasSelectedDolbyVisionProfile(Object? tracks, Set<int> profiles) {
   return false;
 }
 
-bool _selectedVideoExceeds4k(Object? tracks) {
+bool androidTracksExceedCopyBudget(Object? tracks) {
   if (tracks is! List) return false;
   for (final track in tracks) {
     if (track is! Map ||
@@ -82,7 +90,23 @@ bool _selectedVideoExceeds4k(Object? tracks) {
       continue;
     }
     final width = track['demux-w'], height = track['demux-h'];
-    if (width is num && height is num && width * height > 4096 * 2304) {
+    if (width is! num ||
+        height is! num ||
+        !width.isFinite ||
+        !height.isFinite ||
+        width <= 0 ||
+        height <= 0) {
+      continue;
+    }
+    final pixels = width * height;
+    final fps = track['demux-fps'];
+    // Retain the established 4K60 path, but avoid a full CPU round trip
+    // for every 4K120 frame. Unknown frame rates keep their previous policy.
+    if (pixels > 4096 * 2304 ||
+        (fps is num &&
+            fps.isFinite &&
+            fps > 0 &&
+            pixels * fps > 4096 * 2304 * 60)) {
       return true;
     }
   }
@@ -97,16 +121,17 @@ bool androidTracksHaveHdr(Object? tracks) =>
         track['type'] == 'video' &&
         track['selected'] == true &&
         (const {'pq', 'hlg'}.contains(track['demux-gamma']) ||
-            const {5, 7, 8}.contains(track['dolby-vision-profile'])));
+            const {5, 7, 8, 10, 20}.contains(track['dolby-vision-profile'])));
 
 /// Beyond 4K the surface costs more than the decoder: an 8K surface is 33
 /// million pixels to fill and compose for every frame, of which a phone shows
 /// about a seventh. Render such a source at the size that covers the display
 /// in either orientation, so no fit mode loses visible detail. Sources up to
 /// 4K keep their own size.
-Size androidSurfaceSize(int width, int height, Size display) {
+Size androidSurfaceSize(int width, int height, Size display,
+    {bool highFrameRate = false}) {
   final source = Size(width.toDouble(), height.toDouble());
-  if (width * height <= 4096 * 2304) return source;
+  if (!highFrameRate && width * height <= 4096 * 2304) return source;
   if (!display.longestSide.isFinite || display.shortestSide < 1) return source;
   final byLong = display.longestSide / source.longestSide;
   final byShort = display.shortestSide / source.shortestSide;

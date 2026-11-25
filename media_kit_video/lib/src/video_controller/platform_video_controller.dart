@@ -68,6 +68,9 @@ abstract class PlatformVideoController {
 
   void releaseBackdrop() {}
 
+  /// Detach a closing playback page without creating a replacement renderer.
+  Future<void> prepareForClose() async {}
+
   /// {@macro platform_video_controller}
   PlatformVideoController(
     this.player,

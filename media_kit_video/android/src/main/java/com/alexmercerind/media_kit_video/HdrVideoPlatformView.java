@@ -8,6 +8,7 @@ import android.os.Looper;
 import android.view.SurfaceView;
 import android.view.View;
 import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.widget.FrameLayout;
 import java.util.Map;
 import androidx.annotation.NonNull;
@@ -16,6 +17,7 @@ import io.flutter.plugin.platform.PlatformView;
 /** Direct compositor surface. mpv still renders video, ASS and bitmap subtitles. */
 final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback, DisplayManager.DisplayListener {
     final SurfaceView view;
+    private final SurfaceView subtitles;
     private final FrameLayout container;
     private double x, y, width = 1, height = 1;
     private int rotation;
@@ -45,6 +47,31 @@ final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback
         container.setFocusable(false);
         container.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         container.addView(view, new FrameLayout.LayoutParams(1, 1));
+        subtitles = new SurfaceView(context);
+        subtitles.setZOrderMediaOverlay(true);
+        subtitles.getHolder().setFormat(PixelFormat.TRANSLUCENT);
+        subtitles.setFocusable(false);
+        subtitles.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        container.addView(subtitles, new FrameLayout.LayoutParams(1, 1));
+        subtitles.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override public void surfaceCreated(@NonNull SurfaceHolder holder) {
+                // GPU-rendered playback also owns this view. Publish a clear
+                // first buffer so an unused subtitle plane cannot cover it.
+                android.graphics.Canvas canvas = null;
+                try {
+                    canvas = holder.lockCanvas();
+                    if (canvas != null) canvas.drawColor(Color.TRANSPARENT,
+                            android.graphics.PorterDuff.Mode.CLEAR);
+                } catch (IllegalArgumentException | IllegalStateException unavailable) {
+                    // A view may already be detaching during the callback.
+                } finally {
+                    if (canvas != null) holder.unlockCanvasAndPost(canvas);
+                }
+                changed();
+            }
+            @Override public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int w, int h) { changed(); }
+            @Override public void surfaceDestroyed(@NonNull SurfaceHolder holder) { changed(); }
+        });
         container.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> layoutVideo());
         updateLayout(layout);
         view.setFocusable(false);
@@ -67,6 +94,11 @@ final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback
                 && view.getWindowVisibility() == View.VISIBLE
                 && view.getWidth() > 0 && view.getHeight() > 0
                 && view.getHolder().getSurface().isValid();
+    }
+
+    android.view.Surface subtitleSurface() {
+        final android.view.Surface surface = subtitles.getHolder().getSurface();
+        return surface != null && surface.isValid() ? surface : null;
     }
 
     private void changed() { if (!disposed) output.selectNativeSurface(); }
@@ -105,6 +137,13 @@ final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback
         }
         view.setRotation(rotation);
         view.setScaleX(mirror ? -1 : 1);
+        FrameLayout.LayoutParams subtitleLayout = (FrameLayout.LayoutParams) subtitles.getLayoutParams();
+        if (subtitleLayout.width != vw || subtitleLayout.height != vh
+                || subtitleLayout.leftMargin != left || subtitleLayout.topMargin != top) {
+            subtitles.setLayoutParams(new FrameLayout.LayoutParams(params));
+        }
+        subtitles.setRotation(rotation);
+        subtitles.setScaleX(mirror ? -1 : 1);
     }
     @Override public void surfaceCreated(@NonNull SurfaceHolder holder) {
         available = true;

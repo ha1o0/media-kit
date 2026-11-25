@@ -1217,6 +1217,9 @@ class NativePlayer extends PlatformPlayer {
       await waitForPlayerInitialization;
       await waitForVideoControllerInitializationIfAttached;
 
+      for (final prepare in beforeScreenshot.toList()) {
+        await prepare();
+      }
       return compute(
         _screenshot,
         _ScreenshotData(
@@ -1267,7 +1270,11 @@ class NativePlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
     }
 
-    if (configuration.asyncPropertyAccess) {
+    for (final listener in beforePropertySet.toList()) {
+      await listener(property, value);
+    }
+
+    if (configuration.asyncPropertyAccess && _eventCallbackDepth == 0) {
       await _setPropertyString(
         property,
         value,
@@ -1325,7 +1332,7 @@ class NativePlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
     }
 
-    if (configuration.asyncPropertyAccess) {
+    if (configuration.asyncPropertyAccess && _eventCallbackDepth == 0) {
       return _getPropertyStringAsync(property);
     }
 
@@ -1377,7 +1384,9 @@ class NativePlayer extends PlatformPlayer {
       ctx,
       reply,
       name.cast(),
-      generated.mpv_format.MPV_FORMAT_NONE,
+      configuration.synchronousPropertyAccessInCallbacks
+          ? generated.mpv_format.MPV_FORMAT_STRING
+          : generated.mpv_format.MPV_FORMAT_NONE,
     );
     calloc.free(name);
   }
@@ -1494,6 +1503,9 @@ class NativePlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
     }
 
+    for (final listener in beforeCommand.toList()) {
+      await listener(command);
+    }
     await _command(command);
   }
 
@@ -1670,24 +1682,31 @@ class NativePlayer extends PlatformPlayer {
     if (event.ref.event_id ==
         generated.mpv_event_id.MPV_EVENT_PROPERTY_CHANGE) {
       final prop = event.ref.data.cast<generated.mpv_event_property>();
-      if (observedProperties
-          .containsKey(prop.ref.name.cast<Utf8>().toDartString())) {
-        if (prop.ref.format == generated.mpv_format.MPV_FORMAT_NONE) {
-          final fn =
-              observedProperties[prop.ref.name.cast<Utf8>().toDartString()];
-          if (fn != null) {
-            final data = mpv.mpv_get_property_string(ctx, prop.ref.name);
-            if (data != nullptr) {
-              try {
-                await fn.call(data.cast<Utf8>().toDartString());
-              } catch (exception, stacktrace) {
-                print(exception);
-                print(stacktrace);
-              }
-              mpv.mpv_free(data.cast());
-            }
+      final observed =
+          observedProperties[prop.ref.name.cast<Utf8>().toDartString()];
+      if (observed != null) {
+        Pointer<Int8> allocated = nullptr;
+        String? value;
+        if (prop.ref.format == generated.mpv_format.MPV_FORMAT_STRING &&
+            prop.ref.data != nullptr) {
+          final string = prop.ref.data.cast<Pointer<Utf8>>().value;
+          if (string != nullptr) value = string.toDartString();
+        } else if (prop.ref.format == generated.mpv_format.MPV_FORMAT_NONE &&
+            !configuration.synchronousPropertyAccessInCallbacks) {
+          allocated = mpv.mpv_get_property_string(ctx, prop.ref.name);
+          if (allocated != nullptr) {
+            value = allocated.cast<Utf8>().toDartString();
           }
         }
+        if (value != null) {
+          try {
+            await _inEventCallback(() => observed(value!));
+          } catch (exception, stacktrace) {
+            print(exception);
+            print(stacktrace);
+          }
+        }
+        if (allocated != nullptr) mpv.mpv_free(allocated.cast());
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'pause' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
@@ -2262,7 +2281,7 @@ class NativePlayer extends PlatformPlayer {
         // --------------------------------------------------
         for (final hook in onLoadHooks) {
           try {
-            await hook.call();
+            await _inEventCallback(hook);
           } catch (exception, stacktrace) {
             print(exception);
             print(stacktrace);
@@ -2388,7 +2407,7 @@ class NativePlayer extends PlatformPlayer {
       if (prop.ref.name.cast<Utf8>().toDartString() == 'on_loaded') {
         try {
           for (final hook in onBeforeDecodeHooks) {
-            await hook.call();
+            await _inEventCallback(hook);
           }
         } catch (exception, stacktrace) {
           print(exception);
@@ -2401,7 +2420,7 @@ class NativePlayer extends PlatformPlayer {
         // --------------------------------------------------
         for (final hook in onUnloadHooks) {
           try {
-            await hook.call();
+            await _inEventCallback(hook);
           } catch (exception, stacktrace) {
             print(exception);
             print(stacktrace);
@@ -2556,9 +2575,10 @@ class NativePlayer extends PlatformPlayer {
         'dither': 'no',
         'cache': 'yes',
         'cache-on-disk': 'yes',
-        // iOS has no usable default mpv cache directory. Without this, mpv
+        // Mobile has no usable default mpv cache directory. Without this, mpv
         // silently retains demuxed packets in RAM after file-cache creation fails.
-        if (Platform.isIOS) 'demuxer-cache-dir': Directory.systemTemp.path,
+        if (Platform.isIOS || Platform.isAndroid)
+          'demuxer-cache-dir': Directory.systemTemp.path,
         'hr-seek': 'yes',
         'hr-seek-framedrop': 'no',
         'correct-downscaling': 'no',
@@ -2698,6 +2718,23 @@ class NativePlayer extends PlatformPlayer {
           text: 'error: $message $text',
         ),
       );
+    }
+  }
+
+  int _eventCallbackDepth = 0;
+
+  // Replies to asynchronous property requests use this event dispatcher.
+  // Awaited on_load/on_loaded/observer callbacks therefore use synchronous
+  // property access, while normal UI calls remain asynchronous.
+  Future<void> _inEventCallback(Future<void> Function() callback) async {
+    if (!configuration.synchronousPropertyAccessInCallbacks) {
+      return callback();
+    }
+    _eventCallbackDepth++;
+    try {
+      await callback();
+    } finally {
+      _eventCallbackDepth--;
     }
   }
 
@@ -2936,6 +2973,14 @@ class NativePlayer extends PlatformPlayer {
 
   /// Android output policy after track selection, before decoders begin.
   final List<Future<void> Function()> onBeforeDecodeHooks = [];
+
+  /// A video output may leave direct presentation before a processing option
+  /// requires readable frames. Empty for ordinary video outputs.
+  final List<Future<void> Function(String, String)> beforePropertySet = [];
+  final List<Future<void> Function(List<String>)> beforeCommand = [];
+
+  /// Prepare an output which normally leaves decoded pixels on a Surface.
+  final List<Future<void> Function()> beforeScreenshot = [];
 
   /// The methods which must execute synchronously before playback of a source can end.
   final List<Future<void> Function()> onUnloadHooks = [];

@@ -8,6 +8,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
 import 'package:media_kit_video/src/utils/android_video_output.dart';
+import 'package:media_kit_video/src/utils/android_direct_output.dart';
+import 'package:media_kit_video/src/utils/android_dolby_gpu_recovery.dart';
 import 'package:media_kit_video/src/utils/video_backdrop_message.dart';
 import 'dart:collection';
 import 'package:flutter/services.dart';
@@ -44,8 +46,9 @@ class AndroidVideoController extends PlatformVideoController {
   }
 
   Future<void> setProperties(Map<String, String> properties,
-      {bool asynchronous = false}) async {
+      {bool asynchronous = false, bool Function()? isCurrent}) async {
     for (final entry in properties.entries) {
+      if (_closing || _disposed || isCurrent?.call() == false) return;
       if (asynchronous) {
         await platform.setPropertyAsync(entry.key, entry.value,
             waitForInitialization: false);
@@ -69,13 +72,131 @@ class AndroidVideoController extends PlatformVideoController {
   int _backdropDecodeGeneration = 0;
   ui.Image? _retiredBackdrop;
   VideoBackdropFrame? _backdropFrame;
+  String _backdropTransfer = '';
+  bool _limitSurfaceToDisplay = false;
+  bool _closing = false;
+  bool _supportsDirectOutput = false;
+  bool _directAllowed = false;
+  bool _directActive = false;
+  int _subtitleWid = 0;
+  String _directTransfer = '';
+  String _configuredDecoder = '';
+  bool _preparingOutput = false;
+  int _outputGeneration = 0;
+  Completer<void>? _surfaceReady;
+  String? _appliedSurfaceKey;
+  AndroidDolbyGpuRecovery? _dolbyGpuRecovery;
+
+  String _surfaceKey(String output) => '${wid.value}|'
+      '${output == 'mediacodec_embed' ? _subtitleWid : 0}|'
+      '${rect.value}|$_surfaceHdrCapabilities|$_nativeSurfaceSelected|$output';
+
+  bool get _requestedSurfaceReady =>
+      (wid.value ?? 0) != 0 &&
+      _nativeSurfaceSelected == androidNativeSurface.value &&
+      (!androidNativeSurface.value || !_directAllowed || _subtitleWid != 0);
+
+  @override
+  Future<void> prepareForClose() async {
+    if (_disposed || _closing) return;
+    _closing = true;
+    _directAllowed = false;
+    _backdropDecodeGeneration++;
+    final handle = await player.handle;
+    if (_disposed) return;
+    await _channel.invokeMethod('VideoOutputManager.PrepareForClose', {
+      'handle': handle.toString(),
+    });
+    // Disable the video track on mpv's thread. Changing vo to null here would
+    // reopen the decoder against that new VO and queue another seek. Retain
+    // the playback clock until the screen saves its position and disposes it.
+    unawaited(platform
+        .setPropertyAsync('vid', 'no', waitForInitialization: false)
+        .catchError((Object _) {}));
+  }
+
+  Future<void> _leaveDirectOutput() async {
+    if (!_directActive || _closing || _disposed) return;
+    _directAllowed = false;
+    await widListener();
+  }
+
+  Future<void> _onRenderLog(PlayerLog entry, int generation) async {
+    if (_disposed || _closing || generation != _outputGeneration) return;
+    if (_directActive &&
+        (entry.level == 'error' || entry.level == 'fatal') &&
+        (entry.text.contains('Could not open codec') ||
+            entry.text.contains('Error while decoding') ||
+            entry.text.contains('Cannot load libass') ||
+            entry.text.contains('Failed to create hwdevice'))) {
+      unawaited(_leaveDirectOutput());
+    }
+    final recovery = _dolbyGpuRecovery;
+    if (!_directActive &&
+        !_preparingOutput &&
+        recovery != null &&
+        AndroidDolbyGpuRecovery.isInteropError(
+            entry.prefix, entry.level, entry.text)) {
+      bool current() =>
+          !_disposed &&
+          !_closing &&
+          !_preparingOutput &&
+          !_directActive &&
+          generation == _outputGeneration &&
+          identical(recovery, _dolbyGpuRecovery);
+      // A failed frame import is not proof that the HDR display Surface failed.
+      // First retry readable hardware frames on the same mpv/HDR output.
+      final recovered = await recovery.recover(
+        readDecoder: () =>
+            platform.getProperty('hwdec-current', waitForInitialization: false),
+        writeDecoder: (decoder) => platform.setPropertyAsync(
+            'file-local-options/hwdec', decoder,
+            waitForInitialization: false),
+        isCurrent: current,
+      );
+      if (recovered || !current()) return;
+    }
+    if (_disposed ||
+        _closing ||
+        _nativeSurfaceFailed ||
+        !_nativeSurfaceSelected) {
+      return;
+    }
+    if (entry.level == 'error' || entry.level == 'fatal') {
+      final failed = entry.text.contains('Could not create EGL surface') ||
+          entry.text.contains('Failed to set context') ||
+          entry.text.contains('Failed restoring SDR EGL surface') ||
+          entry.text.contains('Failed rendering frame');
+      if (failed) {
+        _nativeSurfaceFailed = true;
+        scheduleMicrotask(() {
+          if (!_disposed && !_closing && generation == _outputGeneration) {
+            nativeHdrActive.value = false;
+            androidNativeSurface.value = false;
+          }
+        });
+      }
+    }
+  }
+
+  Future<void> _beforePropertySet(String property, String value) async {
+    if (_directActive && androidDirectOutputNeedsRenderer(property, value)) {
+      await _leaveDirectOutput();
+    }
+  }
+
+  Future<void> _beforeCommand(List<String> command) async {
+    if (_directActive && androidDirectCommandNeedsRenderer(command)) {
+      await _leaveDirectOutput();
+    }
+  }
 
   @override
   VideoBackdropFrame? get backdropFrame => _backdropFrame;
 
   @override
   void retainBackdrop() {
-    if (_disposed) return;
+    if (_disposed || _closing) return;
     _ensureBackdropChannel();
     if (_backdropConsumers++ == 0) unawaited(_setBackdropSampling(true));
   }
@@ -97,6 +218,7 @@ class AndroidVideoController extends PlatformVideoController {
       await _channel.invokeMethod('VideoOutputManager.SetBackdropSampling', {
         'handle': handle.toString(),
         'enabled': enabled,
+        'transfer': _backdropTransfer,
       });
     } on MissingPluginException {
       // An older embedding keeps the consumer's opaque fallback.
@@ -121,14 +243,24 @@ class AndroidVideoController extends PlatformVideoController {
   }
 
   Future<void> _onTargetChanged(String value) async {
-    if (_disposed) return;
+    if (_disposed || _closing) return;
     try {
       final target = jsonDecode(value);
-      final active = _nativeSurfaceSelected &&
-          target is Map &&
-          target['primaries'] == 'bt.2020' &&
-          const {'pq', 'hlg'}.contains(target['gamma']);
+      final active = _directActive ||
+          (_nativeSurfaceSelected &&
+              target is Map &&
+              target['primaries'] == 'bt.2020' &&
+              const {'pq', 'hlg'}.contains(target['gamma']));
       nativeHdrActive.value = active;
+      final transfer = _directActive
+          ? _directTransfer
+          : active
+              ? target['gamma'] as String
+              : '';
+      if (_backdropTransfer != transfer) {
+        _backdropTransfer = transfer;
+        if (_backdropConsumers > 0) unawaited(_setBackdropSampling(true));
+      }
       final summary = target is Map
           ? '${target['primaries']}/${target['gamma']} format=${target['pixelformat']} native=$_nativeSurfaceSelected'
           : 'unavailable';
@@ -142,6 +274,22 @@ class AndroidVideoController extends PlatformVideoController {
   }
 
   Future<void> _onBeforeDecode() async {
+    if (_closing || _disposed) return;
+    _preparingOutput = true;
+    _outputGeneration++;
+    _appliedSurfaceKey = null;
+    try {
+      await _configureBeforeDecode();
+    } finally {
+      _preparingOutput = false;
+      _surfaceReady = null;
+    }
+  }
+
+  Future<void> _configureBeforeDecode() async {
+    _directActive = false;
+    _directAllowed = false;
+    _dolbyGpuRecovery = null;
     final tracks =
         await platform.getProperty('track-list', waitForInitialization: false);
     Object? decoded;
@@ -150,6 +298,11 @@ class AndroidVideoController extends PlatformVideoController {
     } on FormatException {
       // Missing track metadata keeps the user's configured output.
     }
+    if (androidTracksUseRawDolbyGpu(decoded)) {
+      _dolbyGpuRecovery = AndroidDolbyGpuRecovery();
+    }
+    _limitSurfaceToDisplay =
+        androidTracksHaveHdr(decoded) && androidTracksExceedCopyBudget(decoded);
     androidNativeSurface.value = _nativeHdrSupported &&
         !_nativeSurfaceFailed &&
         androidTracksHaveHdr(decoded);
@@ -157,6 +310,55 @@ class AndroidVideoController extends PlatformVideoController {
         nativeHdr: _nativeHdrSupported);
     final currentDecoder =
         await platform.getProperty('hwdec', waitForInitialization: false);
+    _configuredDecoder = currentDecoder;
+    // Keep mpv GPU rendering as the default after the sample-library comparison.
+    // Native decoder presentation remains opt-in for future device issues,
+    // without disabling HDR surfaces, hardware decoding or mpv processing.
+    if (const bool.fromEnvironment('BOTA_ANDROID_DIRECT_OUTPUT',
+            defaultValue: false) &&
+        _supportsDirectOutput &&
+        _nativeHdrSupported &&
+        !_nativeSurfaceFailed &&
+        decoded is List) {
+      Future<String> value(String key) =>
+          platform.getProperty(key, waitForInitialization: false);
+      var customProcessing = false;
+      for (final key in [
+        'brightness',
+        'contrast',
+        'saturation',
+        'gamma',
+        'hue',
+        'sub-hdr-peak',
+        'image-subs-hdr-peak',
+        'secondary-sub-hdr-peak',
+        'secondary-image-subs-hdr-peak'
+      ]) {
+        final configured = await value(key);
+        if (configured.isNotEmpty &&
+            androidDirectOutputNeedsRenderer(key, configured)) {
+          customProcessing = true;
+          break;
+        }
+      }
+      if (!customProcessing &&
+          androidDirectOutputEligible(
+              decoder: currentDecoder,
+              tracks: decoded,
+              hdrHint: await value('target-colorspace-hint'),
+              filters: await value('vf'),
+              shaders: await value('glsl-shaders'),
+              deinterlace: await value('deinterlace'))) {
+        final track = decoded
+            .cast<Map>()
+            .firstWhere((t) => t['type'] == 'video' && t['selected'] == true);
+        final adjusted = <String, Object?>{...track.cast<String, Object?>()};
+        _directAllowed = await _channel.invokeMethod<bool>(
+                'Utils.SupportsNativeVideo', adjusted) ??
+            false;
+        _directTransfer = track['demux-gamma'] == 'hlg' ? 'hlg' : 'pq';
+      }
+    }
     final decoder = androidHardwareDecoderForTracks(
       currentDecoder,
       configuration.vo!,
@@ -166,50 +368,170 @@ class AndroidVideoController extends PlatformVideoController {
     if (decoder != currentDecoder) {
       await setProperty('file-local-options/hwdec', decoder);
     }
+    // Demux dimensions also prepare ordinary SDR textures before decoding.
+    // A temporary null VO has no hardware device and can exhaust fallback
+    // candidates before the real surface becomes available.
+    if (decoded is List) {
+      Map? track;
+      for (final candidate in decoded) {
+        if (candidate is Map &&
+            candidate['type'] == 'video' &&
+            candidate['selected'] == true) {
+          track = candidate;
+          break;
+        }
+      }
+      final w = track?['demux-w'], h = track?['demux-h'];
+      if (w is num && h is num && w > 0 && h > 0) {
+        final views = ui.PlatformDispatcher.instance.views;
+        final display = views.isEmpty ? Size.zero : views.first.display.size;
+        final size = androidSurfaceSize(w.toInt(), h.toInt(), display,
+            highFrameRate: _limitSurfaceToDisplay);
+        _surfaceReady = Completer<void>();
+        await _channel.invokeMethod('VideoOutputManager.SetSurfaceSize', {
+          'handle': '${await player.handle}',
+          'width': '${size.width.toInt()}',
+          'height': '${size.height.toInt()}',
+        });
+        // HDR -> SDR must also wait until the outgoing native view has
+        // detached. Its Surface can otherwise be destroyed during GPU setup.
+        if (!_requestedSurfaceReady) {
+          await _surfaceReady!.future
+              .timeout(const Duration(milliseconds: 1200), onTimeout: () {});
+        }
+      }
+    }
+    if (_closing || _disposed) return;
     if ((wid.value ?? 0) != 0) {
-      await setProperty('file-local-options/vo', _fileVideoOutput!);
+      final direct =
+          _directAllowed && _nativeSurfaceSelected && _subtitleWid != 0;
+      final output = direct ? 'mediacodec_embed' : _fileVideoOutput!;
+      await setProperty('vo', 'null');
+      await setProperty('android-surface-size',
+          '${rect.value?.width.toInt() ?? 1}x${rect.value?.height.toInt() ?? 1}');
+      await setProperty('wid', '${wid.value}');
+      if (_nativeHdrSupported) {
+        await setProperty('android-hdr-capabilities',
+            _nativeSurfaceSelected ? '$_surfaceHdrCapabilities' : '0');
+      }
+      if (_supportsDirectOutput) {
+        await setProperty(
+            'android-subtitle-wid', direct ? '$_subtitleWid' : '0');
+      }
+      await setProperty(
+          'file-local-options/hwdec', direct ? 'mediacodec' : decoder);
+      _directActive = direct;
+      await setProperty('file-local-options/vo', output);
+      _appliedSurfaceKey = _surfaceKey(output);
+      if (direct) {
+        nativeHdrActive.value = true;
+        _backdropTransfer = _directTransfer;
+      }
     }
   }
 
   Future<void> _onUnload() async {
+    _outputGeneration++;
+    _dolbyGpuRecovery = null;
+    _appliedSurfaceKey = null;
+    _directAllowed = false;
+    _directActive = false;
     _fileVideoOutput = null;
+    _limitSurfaceToDisplay = false;
     nativeHdrActive.value = false;
+    _backdropTransfer = '';
+    if (_backdropConsumers > 0) unawaited(_setBackdropSampling(true));
   }
 
   /// Listener for updating the --wid property.
   Future<void> widListener() {
+    if (_preparingOutput || _disposed || _closing) return Future<void>.value();
+    final generation = _outputGeneration;
     return lock.synchronized(() async {
-      if (_disposed) return;
+      bool stale() =>
+          _disposed ||
+          _closing ||
+          _preparingOutput ||
+          generation != _outputGeneration;
+      if (stale()) return;
       final width = rect.value?.width.toInt() ?? 1;
       final height = rect.value?.height.toInt() ?? 1;
       final androidSurfaceSizeValue = [width, height].join('x');
       final widValue = wid.value?.toString() ?? '0';
       // When --wid is 0, vo=null is required to avoid SIGSEGV.
-      final voValue =
-          widValue == '0' ? 'null' : (_fileVideoOutput ?? configuration.vo!);
-      final vidValue = widValue == '0' ? 'no' : 'auto';
+      final wasDirect = _directActive;
+      final direct = widValue != '0' &&
+          _directAllowed &&
+          _nativeSurfaceSelected &&
+          _subtitleWid != 0;
+      final voValue = widValue == '0'
+          ? 'null'
+          : direct
+              ? 'mediacodec_embed'
+              : (_fileVideoOutput ?? configuration.vo!);
+      final surfaceKey = _surfaceKey(voValue);
+      if (surfaceKey == _appliedSurfaceKey) return;
+      _directActive = direct;
+      if (!kReleaseMode && direct != wasDirect) {
+        debugPrint(direct
+            ? 'Android video: native decoder surface with mpv subtitles'
+            : 'Android video: mpv GPU renderer');
+      }
+      final selectedVideo = player.state.track.video.id;
+      final vidValue = widValue == '0'
+          ? 'no'
+          : selectedVideo == 'no'
+              ? 'auto'
+              : selectedVideo;
+      // Direct output needs a decoder bound to this exact Surface. Suspend
+      // its video track while replacing the VO/device so an intermediate
+      // vo=null cannot prematurely exhaust hardware fallback candidates.
+      if (direct || wasDirect) {
+        await platform.setPropertyAsync('vid', 'no',
+            waitForInitialization: false);
+      }
       // It is important to re-initialize --vo after --android-surface-size.
+      if (stale()) return;
       await platform.setPropertyAsync('vo', 'null',
           waitForInitialization: false);
+      if (stale()) return;
       await setProperties(
         {
           // ORDER IS IMPORTANT.
           'android-surface-size': androidSurfaceSizeValue,
           'wid': widValue,
+          if (_supportsDirectOutput)
+            'android-subtitle-wid': direct ? '$_subtitleWid' : '0',
+          if (direct || wasDirect)
+            'file-local-options/hwdec':
+                direct ? 'mediacodec' : _configuredDecoder,
           if (_nativeHdrSupported)
             'android-hdr-capabilities':
                 _nativeSurfaceSelected ? '$_surfaceHdrCapabilities' : '0',
           'vo': voValue,
           // It is important to re-initialize --vid in-case of --vo=mediacodec_embed.
           // Not doing so causes error "Could not open codec." & video never gets rendered.
-          if (configuration.vo == 'mediacodec_embed') 'vid': vidValue,
+          if (configuration.vo == 'mediacodec_embed' || direct || wasDirect)
+            'vid': vidValue,
         },
         asynchronous: true,
+        isCurrent: () => !stale(),
       );
       // Instead of seeking to the start (Duration.zero), seek to the current playback position
       // without jumping the user to the start of the media.
+      if (stale()) return;
+      _appliedSurfaceKey = surfaceKey;
       final currentPosition = player.state.position;
-      await player.seek(currentPosition);
+      await platform.command([
+        'seek',
+        '${currentPosition.inMilliseconds / 1000}',
+        'absolute+exact'
+      ], waitForInitialization: false);
+      if (direct) nativeHdrActive.value = true;
+      if (direct && _backdropTransfer != _directTransfer) {
+        _backdropTransfer = _directTransfer;
+        if (_backdropConsumers > 0) unawaited(_setBackdropSampling(true));
+      }
     });
   }
 
@@ -224,8 +546,12 @@ class AndroidVideoController extends PlatformVideoController {
     wid.addListener(widListener);
     platform.onBeforeDecodeHooks.add(_onBeforeDecode);
     platform.onUnloadHooks.add(_onUnload);
+    platform.beforePropertySet.add(_beforePropertySet);
+    platform.beforeCommand.add(_beforeCommand);
+    platform.beforeScreenshot.add(_leaveDirectOutput);
     videoParamsSubscription = player.stream.videoParams.listen(
       (event) => lock.synchronized(() async {
+        if (_disposed || _closing) return;
         final int sourceWidth;
         final int sourceHeight;
         if (event.rotate == 0 || event.rotate == 180) {
@@ -240,7 +566,8 @@ class AndroidVideoController extends PlatformVideoController {
         final display = views.isEmpty ? null : views.first.display.size;
         final surface = display == null
             ? null
-            : androidSurfaceSize(sourceWidth, sourceHeight, display);
+            : androidSurfaceSize(sourceWidth, sourceHeight, display,
+                highFrameRate: _limitSurfaceToDisplay);
         final width = surface?.width.toInt() ?? sourceWidth;
         final height = surface?.height.toInt() ?? sourceHeight;
 
@@ -262,6 +589,7 @@ class AndroidVideoController extends PlatformVideoController {
           },
         );
 
+        if (_closing || _disposed) return;
         rect.value = Rect.fromLTWH(
           0.0,
           0.0,
@@ -339,6 +667,10 @@ class AndroidVideoController extends PlatformVideoController {
         final caps =
             await _channel.invokeMethod<int>('Utils.HdrCapabilities') ?? 0;
         controller._nativeHdrSupported = option.isNotEmpty && caps != 0;
+        controller._supportsDirectOutput = (await controller.platform
+                .getProperty('option-info/android-subtitle-wid',
+                    waitForInitialization: false))
+            .isNotEmpty;
       } catch (_) {
         // An older plugin or library cannot accept HDR buffers safely.
       }
@@ -373,31 +705,13 @@ class AndroidVideoController extends PlatformVideoController {
           'video-target-params', controller._onTargetChanged,
           waitForInitialization: false);
       controller._observesTarget = true;
-      controller._renderLogSubscription = player.stream.log.listen((entry) {
-        if (controller._disposed ||
-            controller._nativeSurfaceFailed ||
-            !controller._nativeSurfaceSelected) {
-          return;
-        }
-        if (entry.level == 'error' || entry.level == 'fatal') {
-          final failed = entry.text.contains('Could not create EGL surface') ||
-              entry.text.contains('Failed to set context') ||
-              entry.text.contains('Failed restoring SDR EGL surface') ||
-              entry.text.contains('Failed rendering frame');
-          if (failed) {
-            // Schedule outside mpv's event dispatch; reinitializing VO here
-            // synchronously would deadlock its native callback.
-            controller._nativeSurfaceFailed = true;
-            scheduleMicrotask(() {
-              if (!controller._disposed) {
-                controller.nativeHdrActive.value = false;
-                controller.androidNativeSurface.value = false;
-              }
-            });
-          }
-        }
-      });
     }
+    // Raw Dolby GPU imports can also be used while mapping to an SDR display.
+    controller._renderLogSubscription = player.stream.log.listen((entry) {
+      final generation = controller._outputGeneration;
+      scheduleMicrotask(
+          () => unawaited(controller._onRenderLog(entry, generation)));
+    });
     // Return the [PlatformVideoController].
     return controller;
   }
@@ -427,6 +741,9 @@ class AndroidVideoController extends PlatformVideoController {
     }
     platform.onBeforeDecodeHooks.remove(_onBeforeDecode);
     platform.onUnloadHooks.remove(_onUnload);
+    platform.beforePropertySet.remove(_beforePropertySet);
+    platform.beforeCommand.remove(_beforeCommand);
+    platform.beforeScreenshot.remove(_leaveDirectOutput);
     wid.removeListener(widListener);
     wid.dispose();
     await videoParamsSubscription?.cancel();
@@ -511,11 +828,18 @@ class AndroidVideoController extends PlatformVideoController {
                 final int id = call.arguments['id'];
                 final int wid = call.arguments['wid'];
                 final controller = _controllers[handle];
-                if (controller == null || controller._disposed) break;
+                if (controller == null ||
+                    controller._disposed ||
+                    controller._closing) {
+                  break;
+                }
                 final caps = call.arguments['hdrCapabilities'] as int? ?? 0;
                 final native = call.arguments['nativeSurface'] == true;
+                final subtitleWid = call.arguments['subtitleWid'] as int? ?? 0;
                 final changed = caps != controller._surfaceHdrCapabilities ||
-                    native != controller._nativeSurfaceSelected;
+                    native != controller._nativeSurfaceSelected ||
+                    subtitleWid != controller._subtitleWid;
+                controller._subtitleWid = subtitleWid;
                 controller._surfaceHdrCapabilities = caps;
                 controller._nativeSurfaceSelected = native;
                 controller.rect.value = rect;
@@ -524,6 +848,11 @@ class AndroidVideoController extends PlatformVideoController {
                   unawaited(controller.widListener());
                 } else {
                   controller.wid.value = wid;
+                }
+                if (controller._preparingOutput &&
+                    controller._requestedSurfaceReady) {
+                  final ready = controller._surfaceReady;
+                  if (ready != null && !ready.isCompleted) ready.complete();
                 }
                 break;
               }

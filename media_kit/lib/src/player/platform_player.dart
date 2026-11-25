@@ -488,6 +488,12 @@ class PlayerConfiguration {
   /// Default: `false`.
   final bool asyncPropertyAccess;
 
+  /// Permit synchronous property access from awaited native event hooks and
+  /// deliver observed values with their events. Android Surface preparation
+  /// uses this to avoid waiting for replies on the blocked event dispatcher.
+  /// Existing embedders retain their original callback behavior by default.
+  final bool synchronousPropertyAccessInCallbacks;
+
   /// Whether to use [libass](https://github.com/libass/libass) based subtitle rendering for native backend.
   ///
   /// By default, subtitles rendering is Flutter `Widget` based.
@@ -569,6 +575,7 @@ class PlayerConfiguration {
     this.muted = false,
     this.async = true,
     this.asyncPropertyAccess = false,
+    this.synchronousPropertyAccessInCallbacks = false,
     this.libass = false,
     this.libassAndroidFont,
     this.libassAndroidFontName,

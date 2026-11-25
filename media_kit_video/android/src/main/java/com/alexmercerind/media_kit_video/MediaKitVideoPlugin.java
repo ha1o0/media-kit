@@ -68,6 +68,7 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
     private BasicMessageChannel<ByteBuffer> backdropChannel;
     private VideoOutputManager videoOutputManager;
     private Context applicationContext;
+    private java.util.concurrent.ExecutorService codecQueries;
     private final HashMap<Integer, HdrVideoPlatformView> hdrViews = new HashMap<>();
 
     @Override
@@ -79,6 +80,7 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
             "com.alexmercerind/media_kit_video/backdrop", BinaryCodec.INSTANCE_DIRECT);
 
         applicationContext = flutterPluginBinding.getApplicationContext();
+        codecQueries = java.util.concurrent.Executors.newSingleThreadExecutor();
         videoOutputManager = new VideoOutputManager(flutterPluginBinding.getTextureRegistry());
         flutterPluginBinding.getPlatformViewRegistry().registerViewFactory("media_kit_video/hdr",
             new PlatformViewFactory(StandardMessageCodec.INSTANCE) {
@@ -115,10 +117,11 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
             }
             case "VideoOutputManager.Create": {
                 final long handle = Long.parseLong(call.argument("handle"));
-                videoOutputManager.create(handle, (id, wid, width, height, nativeSurface, hdrCapabilities) -> channel.invokeMethod("VideoOutput.Resize", new HashMap<String, Object>() {{
+                videoOutputManager.create(handle, (id, wid, subtitleWid, width, height, nativeSurface, hdrCapabilities) -> channel.invokeMethod("VideoOutput.Resize", new HashMap<String, Object>() {{
                     put("handle", handle);
                     put("id", id);
                     put("wid", wid);
+                    put("subtitleWid", subtitleWid);
                     put("nativeSurface", nativeSurface);
                     put("hdrCapabilities", hdrCapabilities);
                     put("rect", new HashMap<String, Object>() {{
@@ -138,8 +141,25 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
             }
             case "VideoOutputManager.SetBackdropSampling": {
                 final long handle = Long.parseLong(call.argument("handle"));
-                videoOutputManager.setBackdropSampling(handle, Boolean.TRUE.equals(call.argument("enabled")));
+                videoOutputManager.setBackdropSampling(handle, Boolean.TRUE.equals(call.argument("enabled")),
+                        call.argument("transfer"));
                 result.success(null);
+                break;
+            }
+            case "VideoOutputManager.PrepareForClose": {
+                videoOutputManager.prepareForClose(Long.parseLong(call.argument("handle")));
+                result.success(null);
+                break;
+            }
+            case "Utils.SupportsNativeVideo": {
+                WindowManager wm = (WindowManager) applicationContext.getSystemService(Context.WINDOW_SERVICE);
+                final android.view.Display display = wm == null ? null : wm.getDefaultDisplay();
+                final Map<?, ?> track = (Map<?, ?>) call.arguments;
+                final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+                codecQueries.execute(() -> {
+                    boolean supported = AndroidNativeDecoder.supports(display, track);
+                    main.post(() -> result.success(supported));
+                });
                 break;
             }
             case "VideoOutputManager.SetSurfaceSize": {
@@ -174,6 +194,7 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
 
     @Override
     public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
+        if (codecQueries != null) codecQueries.shutdownNow();
         channel.setMethodCallHandler(null);
         backdropChannel = null;
         hdrViews.clear();

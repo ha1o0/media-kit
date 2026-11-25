@@ -733,11 +733,13 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                 builder: (context, rect, _) {
                   if (id == null ||
                       rect == null ||
-                      !_visible ||
                       rect.width <= 1 ||
                       rect.height <= 1) {
                     return const SizedBox.expand();
                   }
+                  // Demux dimensions can prepare the native Surface before
+                  // decoding. Waiting for decoded width/height here forces a
+                  // temporary texture decoder and another hardware restart.
                   final source = Size(
                       parameters.aspectRatio == null
                           ? rect.width

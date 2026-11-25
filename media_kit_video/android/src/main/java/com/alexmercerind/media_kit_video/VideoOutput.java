@@ -44,6 +44,9 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
 
     private long id = 0;
     private long wid = 0;
+    private long subtitleWid = 0;
+    private Surface selectedSubtitleSurface;
+    private boolean closing;
 
     private final TextureUpdateCallback textureUpdateCallback;
 
@@ -73,7 +76,7 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
     }
 
     void selectNativeSurface() {
-        if (disposed) return;
+        if (disposed || closing) return;
         HdrVideoPlatformView selected = null;
         for (HdrVideoPlatformView view : nativeViews) {
             if (view.eligible() && (selected == null || !selected.fullscreen || view.fullscreen)) {
@@ -92,19 +95,31 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
                 : AndroidHdrCapabilities.mask(selected.view.getDisplay());
         int width = surfaceProducer.getWidth();
         int height = surfaceProducer.getHeight();
+        Surface subtitles = selected == null ? null : selected.subtitleSurface();
         if (surface == selectedSurface && capabilities == selectedCapabilities
+                && subtitles == selectedSubtitleSurface
                 && width == selectedWidth && height == selectedHeight) return;
         selectedWidth = width;
         selectedHeight = height;
+        final boolean videoChanged = surface != selectedSurface;
+        final boolean subtitleChanged = subtitles != selectedSubtitleSurface;
         selectedSurface = surface;
         selectedCapabilities = capabilities;
         backdrop.setSource(surface != null && surface.isValid() ? surface : null, width, height);
         final long oldWid = wid;
-        wid = surface != null && surface.isValid() ? newGlobalObjectRef(surface) : 0;
+        final long oldSubtitleWid = subtitleWid;
+        selectedSubtitleSurface = subtitles;
+        if (subtitleChanged)
+            subtitleWid = subtitles == null ? 0 : newGlobalObjectRef(subtitles);
+        if (videoChanged)
+            wid = surface != null && surface.isValid() ? newGlobalObjectRef(surface) : 0;
         id = surfaceProducer.id();
-        textureUpdateCallback.onTextureUpdate(id, wid, surfaceProducer.getWidth(),
+        textureUpdateCallback.onTextureUpdate(id, wid, subtitleWid, surfaceProducer.getWidth(),
                 surfaceProducer.getHeight(), selected != null, capabilities);
-        if (oldWid != 0) handler.postDelayed(() -> deleteGlobalObjectRef(oldWid), 5000);
+        if (oldWid != 0 && oldWid != wid)
+            handler.postDelayed(() -> deleteGlobalObjectRef(oldWid), 5000);
+        if (oldSubtitleWid != 0 && oldSubtitleWid != subtitleWid)
+            handler.postDelayed(() -> deleteGlobalObjectRef(oldSubtitleWid), 5000);
     }
 
 
@@ -141,12 +156,18 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
         setSurfaceSize(width, height, false);
     }
 
-    void setBackdropSampling(boolean enabled) {
-        backdrop.setEnabled(enabled);
+    void setBackdropSampling(boolean enabled, String transfer) {
+        backdrop.setEnabled(enabled && !closing, transfer);
+    }
+
+    void prepareForClose() {
+        closing = true;
+        backdrop.setEnabled(false, "");
     }
 
     private void setSurfaceSize(int width, int height, boolean force) {
         synchronized (lock) {
+            if (closing || disposed) return;
             try {
                 if (!force && surfaceProducer.getWidth() == width && surfaceProducer.getHeight() == height) {
                     return;
@@ -176,12 +197,19 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
         synchronized (lock) {
             Log.i(TAG, "onSurfaceCleanup");
             if (!disposed && presentingView != null) return;
-            textureUpdateCallback.onTextureUpdate(id, 0, surfaceProducer.getWidth(), surfaceProducer.getHeight(), false, 0);
+            textureUpdateCallback.onTextureUpdate(id, 0, 0, surfaceProducer.getWidth(), surfaceProducer.getHeight(), false, 0);
             selectedSurface = null;
+            selectedSubtitleSurface = null;
             backdrop.setSource(null, 0, 0);
             if (wid != 0) {
                 final long widReference = wid;
+                wid = 0;
                 handler.postDelayed(() -> deleteGlobalObjectRef(widReference), 5000);
+            }
+            if (subtitleWid != 0) {
+                final long reference = subtitleWid;
+                subtitleWid = 0;
+                handler.postDelayed(() -> deleteGlobalObjectRef(reference), 5000);
             }
         }
     }

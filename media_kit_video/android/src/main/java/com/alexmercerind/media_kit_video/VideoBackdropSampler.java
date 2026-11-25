@@ -1,6 +1,7 @@
 package com.alexmercerind.media_kit_video;
 
 import android.graphics.Bitmap;
+import android.graphics.ColorSpace;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -58,6 +59,7 @@ final class VideoBackdropSampler {
     private Surface surface;
     private int sourceWidth, sourceHeight;
     private boolean enabled;
+    private String hdrTransfer = "";
     private boolean disposed;
     private int generation;
 
@@ -70,6 +72,9 @@ final class VideoBackdropSampler {
     private int unchanged;
     private boolean hasSuccessfulCopy;
     private int initialNoDataRetries;
+    private String copyTransfer = "";
+    private ByteBuffer hdrPixels;
+    private boolean copyInFlight;
 
     VideoBackdropSampler(Sink sink) {
         this.sink = sink;
@@ -83,9 +88,11 @@ final class VideoBackdropSampler {
         restart();
     }
 
-    synchronized void setEnabled(boolean enabled) {
-        if (this.enabled == enabled || disposed) return;
+    synchronized void setEnabled(boolean enabled, String transfer) {
+        transfer = "pq".equals(transfer) || "hlg".equals(transfer) ? transfer : "";
+        if (disposed || (this.enabled == enabled && hdrTransfer.equals(transfer))) return;
         this.enabled = enabled;
+        hdrTransfer = transfer;
         restart();
     }
 
@@ -130,13 +137,19 @@ final class VideoBackdropSampler {
     private void capture(int current) {
         final Surface source;
         final int width, height;
+        final String transfer;
         final Handler handler;
         synchronized (this) {
             if (current != generation || !enabled || disposed) return;
             source = surface;
             width = sourceWidth;
             height = sourceHeight;
+            transfer = Build.VERSION.SDK_INT >= 34 ? hdrTransfer : "";
             handler = worker;
+        }
+        if (copyInFlight) {
+            schedule(current, INTERVAL_MS);
+            return;
         }
         if (source == null || handler == null || width < 2 || height < 2 || !source.isValid()) {
             schedule(current, FAILURE_INTERVAL_MS);
@@ -147,16 +160,33 @@ final class VideoBackdropSampler {
         final int outWidth = Math.max(2, (int) Math.round(width * scale));
         final int outHeight = Math.max(2, (int) Math.round(height * scale));
         final int copyWidth = outWidth * REDUCTION, copyHeight = outHeight * REDUCTION;
-        if (copy == null || copy.getWidth() != copyWidth || copy.getHeight() != copyHeight) {
-            copy = Bitmap.createBitmap(copyWidth, copyHeight, Bitmap.Config.ARGB_8888);
-            pixels = new int[copyWidth * copyHeight];
-            reduced = new int[outWidth * outHeight * 3];
-            channels = new int[(outWidth + 2 * PADDING) * (outHeight + 2 * PADDING) * 3];
-            scratch = new int[channels.length];
-            hasLast = false;
-        }
         try {
+            if (copy == null || copy.getWidth() != copyWidth || copy.getHeight() != copyHeight
+                    || !copyTransfer.equals(transfer)) {
+                copyTransfer = transfer;
+                if (!transfer.isEmpty()) {
+                    final boolean hlg = transfer.equals("hlg");
+                    // Match the source encoding, then read raw half floats. getPixels
+                    // would silently convert these HDR components back to sRGB.
+                    final ColorSpace colorSpace = ColorSpace.get(hlg
+                            ? ColorSpace.Named.BT2020_HLG : ColorSpace.Named.BT2020_PQ);
+                    copy = Bitmap.createBitmap(copyWidth, copyHeight, Bitmap.Config.RGBA_F16,
+                            false, colorSpace);
+                    hdrPixels = ByteBuffer.allocateDirect(copy.getAllocationByteCount())
+                            .order(ByteOrder.nativeOrder());
+                } else {
+                    copy = Bitmap.createBitmap(copyWidth, copyHeight, Bitmap.Config.ARGB_8888);
+                    hdrPixels = null;
+                }
+                pixels = new int[copyWidth * copyHeight];
+                reduced = new int[outWidth * outHeight * 3];
+                channels = new int[(outWidth + 2 * PADDING) * (outHeight + 2 * PADDING) * 3];
+                scratch = new int[channels.length];
+                hasLast = false;
+            }
+            copyInFlight = true;
             PixelCopy.request(source, copy, result -> {
+                copyInFlight = false;
                 synchronized (VideoBackdropSampler.this) {
                     if (current != generation || !enabled || disposed) return;
                 }
@@ -167,9 +197,14 @@ final class VideoBackdropSampler {
                     return;
                 }
                 hasSuccessfulCopy = true;
-                publish(current, outWidth, outHeight);
+                try {
+                    publish(current, outWidth, outHeight);
+                } catch (IllegalArgumentException | IllegalStateException released) {
+                    schedule(current, FAILURE_INTERVAL_MS);
+                }
             }, handler);
         } catch (IllegalArgumentException | IllegalStateException released) {
+            copyInFlight = false;
             // The surface went away between the validity check and the request.
             schedule(current, FAILURE_INTERVAL_MS);
         }
@@ -188,8 +223,36 @@ final class VideoBackdropSampler {
         // A request from before a size change can still complete afterwards.
         if (copy == null || copy.getWidth() != width * REDUCTION
                 || copy.getHeight() != height * REDUCTION) return;
-        copy.getPixels(pixels, 0, copy.getWidth(), 0, 0, copy.getWidth(), copy.getHeight());
-        reduce(pixels, copy.getWidth(), reduced, width, height, REDUCTION);
+        if (hdrPixels != null) {
+            hdrPixels.clear();
+            copy.copyPixelsToBuffer(hdrPixels);
+            final boolean hlg = copyTransfer.equals("hlg");
+            // Average the small copy before transfer/gamut conversion. Only
+            // the <=84px glass picture pays for the tone map, off the UI thread.
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    float r = 0, g = 0, b = 0;
+                    for (int dy = 0; dy < REDUCTION; dy++) {
+                        for (int dx = 0; dx < REDUCTION; dx++) {
+                            final int offset = (y * REDUCTION + dy) * copy.getRowBytes()
+                                    + (x * REDUCTION + dx) * 8;
+                            r += VideoBackdropColor.halfToFloat(hdrPixels.getShort(offset));
+                            g += VideoBackdropColor.halfToFloat(hdrPixels.getShort(offset + 2));
+                            b += VideoBackdropColor.halfToFloat(hdrPixels.getShort(offset + 4));
+                        }
+                    }
+                    final int samples = REDUCTION * REDUCTION;
+                    final int pixel = VideoBackdropColor.toSdr(r / samples, g / samples, b / samples, hlg);
+                    final int out = (y * width + x) * 3;
+                    reduced[out] = (pixel >> 16) & 255;
+                    reduced[out + 1] = (pixel >> 8) & 255;
+                    reduced[out + 2] = pixel & 255;
+                }
+            }
+        } else {
+            copy.getPixels(pixels, 0, copy.getWidth(), 0, 0, copy.getWidth(), copy.getHeight());
+            reduce(pixels, copy.getWidth(), reduced, width, height, REDUCTION);
+        }
         blurWithBlackGutter(reduced, channels, scratch, width, height);
         final int paddedWidth = width + 2 * PADDING, paddedHeight = height + 2 * PADDING;
         final ByteBuffer rgba = encode(channels, width, height);

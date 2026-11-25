@@ -54,10 +54,17 @@ public class VideoOutputManager {
         }
     }
 
-    public void setBackdropSampling(long handle, boolean enabled) {
+    public void setBackdropSampling(long handle, boolean enabled, String transfer) {
         synchronized (lock) {
             final VideoOutput output = videoOutputs.get(handle);
-            if (output != null) output.setBackdropSampling(enabled);
+            if (output != null) output.setBackdropSampling(enabled, transfer);
+        }
+    }
+
+    public void prepareForClose(long handle) {
+        synchronized (lock) {
+            VideoOutput output = videoOutputs.get(handle);
+            if (output != null) output.prepareForClose();
         }
     }
 
