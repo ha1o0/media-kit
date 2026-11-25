@@ -111,10 +111,10 @@ task downloadDependencies(type: Exec) {
 
         // Download all *.jar dependencies & verify their SHA-256 checksums.
         def filesToDownload = [
-            ["url": "https://github.com/ha1o0/libmpv-android-video-build/releases/download/v1.0.0-android.zcopy.7/default-arm64-v8a.jar", "sha256": "71f1e3f2bffb5c967535e155ff963d93d28dd5681dd5e63d35f763f13b7361b0", "destination": file("$buildDir/v1.0.0-android.zcopy.7/default-arm64-v8a.jar")],
-            ["url": "https://github.com/ha1o0/libmpv-android-video-build/releases/download/v1.0.0-android.zcopy.7/default-armeabi-v7a.jar", "sha256": "831facec7550970f3eabf48979d908849a073fac273ef87cc806886c186941a1", "destination": file("$buildDir/v1.0.0-android.zcopy.7/default-armeabi-v7a.jar")],
-            ["url": "https://github.com/ha1o0/libmpv-android-video-build/releases/download/v1.0.0-android.zcopy.7/default-x86.jar", "sha256": "d95e3838b8348f0c3ad4543b9d7ca00c1c238113656206eff77cdd60bcb3c22a", "destination": file("$buildDir/v1.0.0-android.zcopy.7/default-x86.jar")],
-            ["url": "https://github.com/ha1o0/libmpv-android-video-build/releases/download/v1.0.0-android.zcopy.7/default-x86_64.jar", "sha256": "bc7244808dddd9fbb489172ce69fac0fef6b392611ede78dea444588e90745f7", "destination": file("$buildDir/v1.0.0-android.zcopy.7/default-x86_64.jar")]
+            ["url": "https://github.com/ha1o0/libmpv-android-video-build/releases/download/v1.0.0-android.zcopy.8/default-arm64-v8a.jar", "sha256": "c8f5e98877d7edb3332a45434ba6b8667387e9e035f437c463448b3c1d57b9c6", "destination": file("$buildDir/v1.0.0-android.zcopy.8/default-arm64-v8a.jar")],
+            ["url": "https://github.com/ha1o0/libmpv-android-video-build/releases/download/v1.0.0-android.zcopy.8/default-armeabi-v7a.jar", "sha256": "cf9365bbbee618cc51b91a5392b099cafb965c2304d01a078ad1d8edbcc85ceb", "destination": file("$buildDir/v1.0.0-android.zcopy.8/default-armeabi-v7a.jar")],
+            ["url": "https://github.com/ha1o0/libmpv-android-video-build/releases/download/v1.0.0-android.zcopy.8/default-x86.jar", "sha256": "abea78a8904ef6fe293acb98a56cdf7af71199fcf52dae71638f75e4629340dd", "destination": file("$buildDir/v1.0.0-android.zcopy.8/default-x86.jar")],
+            ["url": "https://github.com/ha1o0/libmpv-android-video-build/releases/download/v1.0.0-android.zcopy.8/default-x86_64.jar", "sha256": "3288ed1db1c6442f2524180e60fa032c08d7de71e8f3750b65f116f366124281", "destination": file("$buildDir/v1.0.0-android.zcopy.8/default-x86_64.jar")]
         ]
 
         filesToDownload.each { fileInfo ->
