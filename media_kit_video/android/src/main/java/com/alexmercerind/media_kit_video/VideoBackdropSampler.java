@@ -5,6 +5,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.util.Log;
 import android.view.PixelCopy;
 import android.view.Surface;
 
@@ -69,6 +70,7 @@ final class VideoBackdropSampler {
     private boolean hasLast;
     private int unchanged;
     private boolean hasSuccessfulCopy;
+    private boolean diagnosed;
     private int initialNoDataRetries;
 
     VideoBackdropSampler(Sink sink) {
@@ -113,6 +115,7 @@ final class VideoBackdropSampler {
             hasLast = false;
             unchanged = 0;
             hasSuccessfulCopy = false;
+            diagnosed = false;
             initialNoDataRetries = 0;
             capture(current);
         });
@@ -189,6 +192,10 @@ final class VideoBackdropSampler {
         if (copy == null || copy.getWidth() != width * REDUCTION
                 || copy.getHeight() != height * REDUCTION) return;
         copy.getPixels(pixels, 0, copy.getWidth(), 0, 0, copy.getWidth(), copy.getHeight());
+        if (!diagnosed) {
+            diagnosed = true;
+            logCopyStatistics(copy, pixels);
+        }
         reduce(pixels, copy.getWidth(), reduced, width, height, REDUCTION);
         blurWithBlackGutter(reduced, channels, scratch, width, height);
         final int paddedWidth = width + 2 * PADDING, paddedHeight = height + 2 * PADDING;
@@ -214,6 +221,41 @@ final class VideoBackdropSampler {
             sink.onBackdrop(paddedWidth, paddedHeight, rgba);
         });
         schedule(current, INTERVAL_MS);
+    }
+
+    /**
+     * One line per sampling session: what the platform copy returned, before
+     * any processing. Unpremultiplied and stored (premultiplied) channels
+     * differ when the source surface carries a non-opaque alpha channel.
+     */
+    private static void logCopyStatistics(Bitmap copy, int[] argb) {
+        try {
+            final int n = copy.getWidth() * copy.getHeight();
+            long a = 0, r = 0, g = 0, b = 0;
+            for (int i = 0; i < n; i++) {
+                final int pixel = argb[i];
+                a += pixel >>> 24;
+                r += (pixel >> 16) & 0xFF;
+                g += (pixel >> 8) & 0xFF;
+                b += pixel & 0xFF;
+            }
+            final ByteBuffer stored = ByteBuffer.allocate(copy.getByteCount());
+            copy.copyPixelsToBuffer(stored);
+            long sr = 0, sg = 0, sb = 0, sa = 0;
+            for (int i = 0; i < n; i++) {
+                sr += stored.get(i * 4) & 0xFF;
+                sg += stored.get(i * 4 + 1) & 0xFF;
+                sb += stored.get(i * 4 + 2) & 0xFF;
+                sa += stored.get(i * 4 + 3) & 0xFF;
+            }
+            Log.i("media_kit_video", "Backdrop copy: sdk=" + Build.VERSION.SDK_INT
+                    + " size=" + copy.getWidth() + "x" + copy.getHeight()
+                    + " colorSpace=" + (Build.VERSION.SDK_INT >= 26 ? copy.getColorSpace() : "n/a")
+                    + " mean argb=" + a / n + "/" + r / n + "/" + g / n + "/" + b / n
+                    + " stored rgba=" + sr / n + "/" + sg / n + "/" + sb / n + "/" + sa / n);
+        } catch (RuntimeException ignored) {
+            // Diagnostics never affect sampling.
+        }
     }
 
     /** Black bars are part of the blur input, not added after filtering. */

@@ -19,8 +19,9 @@ String androidVideoOutputForTracks(String configured, Object? tracks,
 /// GPU: about 25 MB per 4K frame and 100 MB per 8K frame. A native HDR surface
 /// shows the HDR10/HLG base layer without any per-frame mapping, so the frames
 /// may stay on the GPU there. They do so when the user chose the performance
-/// decoder, and for pictures larger than 4K, which the copy cannot keep up
-/// with at all. Profile 5 has no such base layer and always needs its planes.
+/// decoder, for pictures larger than 4K, and for frame rates the copy cannot
+/// keep up with (4K at 120 fps moves about 3 GB per second each way). Profile
+/// 5 has no such base layer and always needs its planes.
 String androidHardwareDecoderForTracks(
   String configured,
   String videoOutput,
@@ -48,7 +49,8 @@ String androidHardwareDecoderForTracks(
         !_hasSelectedDolbyVisionProfile(tracks, const {5})) {
       if (configured == 'mediacodec') return configured;
       if (configured == 'mediacodec,mediacodec-copy' &&
-          _selectedVideoExceeds4k(tracks)) {
+          (_selectedVideoExceeds4k(tracks) ||
+              _selectedVideoExceedsCopyRate(tracks))) {
         return configured;
       }
     }
@@ -83,6 +85,30 @@ bool _selectedVideoExceeds4k(Object? tracks) {
     }
     final width = track['demux-w'], height = track['demux-h'];
     if (width is num && height is num && width * height > 4096 * 2304) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// Pixel rates up to 4K at 60 fps keep the copy as before. Beyond that (4K at
+/// 120 fps, for example) frames stay on the GPU, with the copy as fallback.
+/// Files without a container frame rate keep the copy.
+bool _selectedVideoExceedsCopyRate(Object? tracks) {
+  if (tracks is! List) return false;
+  for (final track in tracks) {
+    if (track is! Map ||
+        track['type'] != 'video' ||
+        track['selected'] != true) {
+      continue;
+    }
+    final width = track['demux-w'], height = track['demux-h'];
+    final fps = track['demux-fps'];
+    if (width is num &&
+        height is num &&
+        fps is num &&
+        fps.isFinite &&
+        width * height * fps > 4096 * 2304 * 60) {
       return true;
     }
   }
