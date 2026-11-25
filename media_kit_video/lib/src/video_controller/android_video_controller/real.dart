@@ -226,16 +226,23 @@ class AndroidVideoController extends PlatformVideoController {
     platform.onUnloadHooks.add(_onUnload);
     videoParamsSubscription = player.stream.videoParams.listen(
       (event) => lock.synchronized(() async {
-        final int width;
-        final int height;
+        final int sourceWidth;
+        final int sourceHeight;
         if (event.rotate == 0 || event.rotate == 180) {
-          width = event.dw ?? 0;
-          height = event.dh ?? 0;
+          sourceWidth = event.dw ?? 0;
+          sourceHeight = event.dh ?? 0;
         } else {
           // width & height are swapped for 90 or 270 degrees rotation.
-          width = event.dh ?? 0;
-          height = event.dw ?? 0;
+          sourceWidth = event.dh ?? 0;
+          sourceHeight = event.dw ?? 0;
         }
+        final views = ui.PlatformDispatcher.instance.views;
+        final display = views.isEmpty ? null : views.first.display.size;
+        final surface = display == null
+            ? null
+            : androidSurfaceSize(sourceWidth, sourceHeight, display);
+        final width = surface?.width.toInt() ?? sourceWidth;
+        final height = surface?.height.toInt() ?? sourceHeight;
 
         final isZero = width == 0 || height == 0;
         final isSame = width == rect.value?.width.toInt() &&

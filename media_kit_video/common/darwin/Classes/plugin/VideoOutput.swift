@@ -104,6 +104,7 @@ public class VideoOutput: NSObject {
     // Opt-in device diagnostics; no per-frame clock reads in ordinary builds.
     private let measuresRenderTime = ProcessInfo.processInfo.environment["BOTA_IOS_RENDER_PROBE"] == "1"
     private var renderTimes: [Double] = []
+    private let screenPixels = UIScreen.main.nativeBounds.size
   #endif
 
   init(
@@ -597,6 +598,9 @@ public class VideoOutput: NSObject {
         let ratio = 640 / max(size.width, size.height)
         size = CGSize(width: max(2, (size.width * ratio).rounded(.down)),
           height: max(2, (size.height * ratio).rounded(.down)))
+      } else if width == nil && height == nil {
+        // An explicit size is a caller's request (shader upscaling targets).
+        size = IOSRenderTargetPolicy.size(for: size, screen: screenPixels)
       }
     #else
       let size = logicalSize
