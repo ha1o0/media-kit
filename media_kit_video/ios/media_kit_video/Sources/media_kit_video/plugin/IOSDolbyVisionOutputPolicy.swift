@@ -3,6 +3,18 @@ import Foundation
 /// Native Dolby Vision is an output choice, not a replacement for mpv's
 /// picture processing. Keep the existing compositor whenever it is needed.
 enum IOSDolbyVisionOutputPolicy {
+  static func composesPictureInPicture(framesArmed: Bool, nativePermitted: Bool,
+                                      compositionSupported: Bool,
+                                      primary: String?, primaryVisible: String?,
+                                      secondary: String?, secondaryVisible: String?) -> Bool {
+    func selected(_ track: String?, _ visible: String?) -> Bool {
+      guard let track = track, let id = Int(track), id > 0 else { return false }
+      return visible != "no"
+    }
+    return framesArmed && nativePermitted && compositionSupported &&
+      (selected(primary, primaryVisible) || selected(secondary, secondaryVisible))
+  }
+
   static func permits(enabled: Bool, systemSupported: Bool, hint: String?,
                       profile: Int?, needsPictureProcessing: Bool, rejected: Bool) -> Bool {
     enabled && systemSupported && ["auto", "yes"].contains(hint ?? "") &&

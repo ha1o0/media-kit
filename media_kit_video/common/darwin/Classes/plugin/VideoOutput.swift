@@ -96,6 +96,8 @@ public class VideoOutput: NSObject {
     private var lastDolbyVisionFrameDescription: [String: Any] = [:]
     // Worker-owned current native frame, including a paused PiP handoff.
     private var currentDolbyVisionFrame: CVPixelBuffer?
+    private var loggedDolbyPipCompositionFailure = false
+    private var usedDolbyPipComposition = false
     private var inlineFrameSource: String?
     // Accessed on the main thread, like dolbyFrame and the presentation views.
     private var dolbyFrameSource: String?
@@ -143,6 +145,13 @@ public class VideoOutput: NSObject {
         let requestFrame = event.userInfo?["requestFrame"] as? Bool == true
         that.worker.enqueue { [weak that] in
           guard let that = that, !that.disposed else { return }
+          let presentationChanged = that.pipPolicy.presenting != active
+          if presentationChanged && !active && that.usedDolbyPipComposition {
+            // A PiP layer rejecting the composed HDR sample must not disable
+            // the separate inline Dolby layer after the window is closed.
+            that.hdrPipRejected = false
+            that.usedDolbyPipComposition = false
+          }
           that.pipFrameDelivery = frames
           if !frames {
             that.pendingPipFrame.discard()
@@ -153,6 +162,10 @@ public class VideoOutput: NSObject {
           }
           that.pipPolicy.presenting = active
           that.updatePictureInPictureRenderer()
+          // Paused playback has no new frame to trigger the output switch.
+          if presentationChanged && that.pipPolicy.appIsActive && that.usesDolbyVisionPassthrough {
+            that._updateCallback()
+          }
           if requestFrame && that.pipPolicy.appIsActive && that.pipFrameDelivery {
             that.deliverPictureInPictureFrame(force: true)
           }
@@ -759,6 +772,7 @@ public class VideoOutput: NSObject {
     private func drainPictureInPictureFrame() {
       guard let renderer = texture as? TextureIOSurface else { return }
       if usesDolbyVisionPassthrough { refreshDolbyVisionSource(renderer) }
+      if deliverCompositedDolbyPipFrame(renderer, current: false, handoff: false) { return }
       if pipFrameDelivery, permitsDolbyVisionSamples(),
         let peek = renderer.decodedPictureInPictureFrame(dequeue: false).pixel,
         DolbyVisionFrame.hasMetadata(peek) {
@@ -869,6 +883,51 @@ public class VideoOutput: NSObject {
         rejected: dolbyVisionRejectionReason != nil || hdrPipRejected)
     }
 
+    private func shouldCompositeDolbyPip(_ renderer: TextureIOSurface) -> Bool {
+      let permitted = IOSDolbyVisionOutputPolicy.permits(enabled: usesDolbyVisionPassthrough,
+        systemSupported: systemSupportsDolbyVision, hint: stringProperty("target-colorspace-hint"),
+        profile: dolbyVisionSourceProfile, needsPictureProcessing: dolbyVisionNeedsPictureProcessing(),
+        rejected: dolbyVisionRejectionReason != nil)
+      return IOSDolbyVisionOutputPolicy.composesPictureInPicture(
+        framesArmed: pipFrameDelivery, nativePermitted: permitted,
+        compositionSupported: renderer.supportsDolbyPictureInPictureComposition,
+        primary: stringProperty("sid"), primaryVisible: stringProperty("sub-visibility"),
+        secondary: stringProperty("secondary-sid"), secondaryVisible: stringProperty("secondary-sub-visibility"))
+    }
+
+    /// Keep the same decoder, RPU and subtitle clock. Only PiP's presentation
+    /// becomes PQ/EDR; never send raw P5 pixels with ordinary HDR color tags.
+    private func deliverCompositedDolbyPipFrame(_ renderer: TextureIOSurface,
+                                               current: Bool, handoff: Bool) -> Bool {
+      guard shouldCompositeDolbyPip(renderer) else { return false }
+      let started = measuresRenderTime ? CFAbsoluteTimeGetCurrent() : 0
+      let result = renderer.compositedDolbyPictureInPictureFrame(videoSize, current: current)
+      if measuresRenderTime, renderTimes.count < 3600 {
+        renderTimes.append((CFAbsoluteTimeGetCurrent() - started) * 1000)
+      }
+      guard let pixel = result.pixel else {
+        if !result.supported && !loggedDolbyPipCompositionFailure {
+          loggedDolbyPipCompositionFailure = true
+          NSLog("VideoOutput: Dolby PiP composition unavailable; retaining the last valid PiP frame")
+        }
+        return true
+      }
+      loggedDolbyPipCompositionFailure = false
+      usedDolbyPipComposition = true
+      var output = pixel
+      if hdrPipRejected {
+        if hdrPipFrameConverter == nil { hdrPipFrameConverter = HDRPictureInPictureFrameConverter() }
+        guard let sdr = hdrPipFrameConverter?.convert(pixel, colorSpace: 1) else { return true }
+        output = sdr
+      } else {
+        logHdrPictureInPictureSource("Dolby RPU and subtitle compositor", kind: .pq)
+      }
+      pipFrameSource = .composited
+      lastPipPreviewFrame = CFAbsoluteTimeGetCurrent()
+      enqueuePictureInPictureFrame(output, handoff: handoff)
+      return true
+    }
+
     private func refreshDolbyVisionSource(_ renderer: TextureIOSurface) {
       let source = playbackSource()
       if source != dolbyVisionSource {
@@ -878,6 +937,8 @@ public class VideoOutput: NSObject {
         loggedDolbyVisionFrame = false
         lastDolbyVisionFrameDescription = [:]
         currentDolbyVisionFrame = nil
+        loggedDolbyPipCompositionFailure = false
+        usedDolbyPipComposition = false
       }
       // A demuxer's track metadata can arrive after its first frame. Retry
       // only for actual Dolby frames rather than caching unknown forever.
@@ -894,6 +955,7 @@ public class VideoOutput: NSObject {
       guard usesDolbyVisionPassthrough, pipPolicy.appIsActive, !pipRendering,
         !pipHandoff.needsDecodedFrame, let renderer = texture as? TextureIOSurface else { return false }
       refreshDolbyVisionSource(renderer)
+      if pipPolicy.presenting && shouldCompositeDolbyPip(renderer) { return false }
       let source = dolbyVisionSource ?? ""
       let profile = dolbyVisionSourceProfile
       guard systemSupportsDolbyVision, [5, 8].contains(profile ?? 0),
@@ -937,6 +999,7 @@ public class VideoOutput: NSObject {
       // AVKit maps the same Dolby Vision samples; its preview has no overlay.
       let now = CFAbsoluteTimeGetCurrent()
       if pipFrameDelivery, pipPolicy.presenting || now - lastPipPreviewFrame >= 0.5 {
+        if deliverCompositedDolbyPipFrame(renderer, current: true, handoff: false) { return true }
         lastPipPreviewFrame = now
         pipFrameSource = .decoded
         enqueuePictureInPictureFrame(video, handoff: false)
@@ -1003,6 +1066,8 @@ public class VideoOutput: NSObject {
       guard pipFrameDelivery, force || pipPolicy.presenting || previewTime - lastPipPreviewFrame >= 0.5 else { return }
       if usesDolbyVisionPassthrough, let renderer = texture as? TextureIOSurface {
         refreshDolbyVisionSource(renderer)
+        if currentDolbyVisionFrame != nil &&
+          deliverCompositedDolbyPipFrame(renderer, current: true, handoff: handoff) { return }
       }
       if let frame = currentDolbyVisionFrame, permitsDolbyVisionSamples() {
         pipFrameSource = .decoded

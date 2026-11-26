@@ -21,6 +21,8 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private var currentFrame: CVPixelBuffer?
   private var pipPool: CVPixelBufferPool?
   private var pipPoolSize = CGSize.zero
+  private var dolbyPipPool: CVPixelBufferPool?
+  private var dolbyPipPoolSize = CGSize.zero
   /// Highest software composition mode the library reports: 0 none, 1 SDR
   /// subtitle blending, 2 also maps subtitles into a PQ/HLG frame.
   private var sameContextPipMode: Int32?
@@ -183,6 +185,65 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   /// library that also maps subtitles into that transfer may be tagged as HDR;
   /// an older one would blend white text at the format's peak.
   var supportsHdrPictureInPictureComposition: Bool { sameContextPictureInPictureMode >= 2 }
+  var supportsDolbyPictureInPictureComposition: Bool { sameContextPictureInPictureMode >= 4 }
+
+  /// Bounded CPU RPU reshaping and subtitle composition. The output contains
+  /// actual BT.2020/PQ RGB pixels, with no Dolby RPU copied from the decoder.
+  /// `current` primes a paused/foreground PiP without consuming a future frame.
+  func compositedDolbyPictureInPictureFrame(_ size: CGSize, current: Bool)
+      -> (supported: Bool, pixel: CVPixelBuffer?) {
+    guard supportsDolbyPictureInPictureComposition, let renderContext = renderContext,
+      size.width > 0, size.height > 0 else { return (false, nil) }
+    let ratio = min(1, 640 / max(size.width, size.height))
+    let target = CGSize(width: max(1, (size.width * ratio).rounded(.down)),
+      height: max(1, (size.height * ratio).rounded(.down)))
+    if dolbyPipPool == nil || dolbyPipPoolSize != target {
+      dolbyPipPool = nil
+      dolbyPipPoolSize = target
+      let attributes: [String: Any] = [
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_ARGB2101010LEPacked,
+        kCVPixelBufferWidthKey as String: Int(target.width),
+        kCVPixelBufferHeightKey as String: Int(target.height),
+        kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+      ]
+      CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &dolbyPipPool)
+    }
+    var pixel: CVPixelBuffer?
+    let limits = [kCVPixelBufferPoolAllocationThresholdKey: 3] as CFDictionary
+    guard let pool = dolbyPipPool,
+      CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(nil, pool, limits, &pixel) == kCVReturnSuccess,
+      let pixel = pixel, CVPixelBufferLockBaseAddress(pixel, []) == kCVReturnSuccess else { return (true, nil) }
+    defer { CVPixelBufferUnlockBaseAddress(pixel, []) }
+    var mode: Int32 = current ? 4 : 3
+    var skip: Int32 = 1, block: Int32 = current ? 0 : 1
+    var dimensions: [Int32] = [Int32(target.width), Int32(target.height)]
+    var stride = CVPixelBufferGetBytesPerRow(pixel)
+    let result = withUnsafeMutablePointer(to: &mode) { modePointer in
+      withUnsafeMutablePointer(to: &skip) { skipPointer in
+        withUnsafeMutablePointer(to: &block) { blockPointer in
+          withUnsafeMutablePointer(to: &stride) { stridePointer in
+            dimensions.withUnsafeMutableBytes { dimensionsPointer in
+              "x2rgb10le".withCString { format in
+                var params = [
+                  mpv_render_param(type: mpv_render_param_type(rawValue: 26), data: UnsafeMutableRawPointer(modePointer)),
+                  mpv_render_param(type: MPV_RENDER_PARAM_SKIP_RENDERING, data: UnsafeMutableRawPointer(skipPointer)),
+                  mpv_render_param(type: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: UnsafeMutableRawPointer(blockPointer)),
+                  mpv_render_param(type: MPV_RENDER_PARAM_SW_SIZE, data: dimensionsPointer.baseAddress),
+                  mpv_render_param(type: MPV_RENDER_PARAM_SW_FORMAT, data: UnsafeMutableRawPointer(mutating: format)),
+                  mpv_render_param(type: MPV_RENDER_PARAM_SW_STRIDE, data: UnsafeMutableRawPointer(stridePointer)),
+                  mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: CVPixelBufferGetBaseAddress(pixel)),
+                  mpv_render_param(),
+                ]
+                return mpv_render_context_render(renderContext, &params)
+              }
+            }
+          }
+        }
+      }
+    }
+    if result >= 0 { HDRPictureInPictureTags.apply(pixel, kind: .pq, yuv: false) }
+    return (result >= 0 || result == MPV_ERROR_UNINITIALIZED.rawValue, result >= 0 ? pixel : nil)
+  }
 
   /// Compose subtitles / transformed or software frames on the same decoder.
   /// The private parameter bypasses every primary GPU operation, including
@@ -443,7 +504,10 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
           value = (Double(bytes[0]) + Double(bytes[1]) + Double(bytes[2])) / (3 * 255)
         } else {
           let word = p.load(as: UInt32.self)
-          value = Double((word & 1023) + ((word >> 10) & 1023) + ((word >> 20) & 1023)) / (3 * 1023)
+          let blue: UInt32 = word & 1023
+          let green: UInt32 = (word >> 10) & 1023
+          let red: UInt32 = (word >> 20) & 1023
+          value = Double(blue + green + red) / (3 * 1023)
         }
         total += value
         minimum = min(minimum, value)

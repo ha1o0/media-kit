@@ -1,7 +1,7 @@
 all: .cache/xcframeworks/.selected-archive
 
-MPV_XCFRAMEWORKS_VERSION=v2.27.0-ios.12
-MPV_XCFRAMEWORKS_SHA256SUM=38f80098d27fff303a16905af3400e19c6fbdbe65bd9b7a14d8ad3fd20775a49
+MPV_XCFRAMEWORKS_VERSION=v2.27.0-ios.15
+MPV_XCFRAMEWORKS_SHA256SUM=2e8a93d7005a4294916cebe9c1eb79dc9f4367ca3036fc1e6f44735938be036b
 MPV_XCFRAMEWORKS_LOCAL_ARCHIVE ?= $(wildcard local_libmpv/libmpv-xcframeworks-ios-universal.tar.gz)
 
 ifeq ($(strip $(MPV_XCFRAMEWORKS_LOCAL_ARCHIVE)),)
