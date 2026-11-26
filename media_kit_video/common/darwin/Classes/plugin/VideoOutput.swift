@@ -4,6 +4,7 @@ import Foundation
   import Accelerate
   import AVFoundation
   import UIKit
+  import VideoToolbox
 #endif
 
 #if canImport(Flutter)
@@ -104,6 +105,8 @@ public class VideoOutput: NSObject {
     // Opt-in device diagnostics; no per-frame clock reads in ordinary builds.
     private let measuresRenderTime = ProcessInfo.processInfo.environment["BOTA_IOS_RENDER_PROBE"] == "1"
     private var renderTimes: [Double] = []
+    private var recoveredGpuSource: String?
+    private var gpuRecoveryCount = 0
     private let screenPixels = UIScreen.main.nativeBounds.size
   #endif
 
@@ -344,8 +347,32 @@ public class VideoOutput: NSObject {
         stats["sourceDolbyVisionProfile"] = self.dolbyVisionSourceProfile.map { $0 as Any } ?? NSNull()
         stats["subtitleTrack"] = self.stringProperty("sid").map { $0 as Any } ?? NSNull()
         stats["dolbyVisionRejection"] = self.dolbyVisionRejectionReason ?? NSNull()
+        stats["gpuRecoveries"] = self.gpuRecoveryCount
+        if self.measuresRenderTime {
+          stats["outputSamples"] = (self.texture as? TextureIOSurface)?.diagnosticFrameSummary() ?? [:]
+          stats["hardwareCodecs"] = [
+            "h264": VTIsHardwareDecodeSupported(0x61766331),
+            "hevc": VTIsHardwareDecodeSupported(0x68766331),
+            "dolbyHevc": VTIsHardwareDecodeSupported(0x64766831),
+            "vp9": VTIsHardwareDecodeSupported(0x76703039),
+            "av1": VTIsHardwareDecodeSupported(0x61763031),
+          ]
+        }
         if reset { self.renderTimes.removeAll(keepingCapacity: true) }
         DispatchQueue.main.async { completion(stats) }
+      }
+    }
+
+    func probeGpuRecovery(completion: @escaping (Bool) -> Void) {
+      guard measuresRenderTime else { completion(false); return }
+      worker.enqueue { [weak self] in
+        guard let self = self, !self.disposed else {
+          DispatchQueue.main.async { completion(false) }
+          return
+        }
+        let injected = (self.texture as? TextureIOSurface)?.probeDeviceFailure() == true
+        let recovered = injected && self.recoverFailedGpuRenderer()
+        DispatchQueue.main.async { completion(recovered) }
       }
     }
 
@@ -590,6 +617,7 @@ public class VideoOutput: NSObject {
         return
       }
       if !pipPolicy.appIsActive && !pipRendering { return }
+      if recoverFailedGpuRenderer() { return }
     #endif
     let logicalSize = videoSize
     #if os(iOS)
@@ -632,7 +660,10 @@ public class VideoOutput: NSObject {
       currentDolbyVisionFrame = nil
       let renderStart = measuresRenderTime ? CFAbsoluteTimeGetCurrent() : 0
       guard texture.renderVideoFrame(size, needsDecodedFrame: pipHandoff.needsDecodedFrame),
-        let frame = texture.copyPixelBuffer()?.takeRetainedValue() else { return }
+        let frame = texture.copyPixelBuffer()?.takeRetainedValue() else {
+        _ = recoverFailedGpuRenderer()
+        return
+      }
       if measuresRenderTime, renderTimes.count < 3600 {
         renderTimes.append((CFAbsoluteTimeGetCurrent() - renderStart) * 1000)
       }
@@ -777,6 +808,33 @@ public class VideoOutput: NSObject {
         drainsPictureInPictureFrames = false
         updatePictureInPictureRenderer()
       }
+    }
+
+    /// A lost Vulkan/Metal device cannot be repaired by clearing its frame
+    /// queue. Recreate the renderer on the same mpv player; track selection,
+    /// audio clock, subtitles and user options stay on that player.
+    private func recoverFailedGpuRenderer() -> Bool {
+      guard !disposed, pipPolicy.appIsActive, !pipRendering,
+        let renderer = texture as? TextureIOSurface, renderer.deviceFailed else { return false }
+      let source = playbackSource()
+      guard recoveredGpuSource != source else { return false }
+      recoveredGpuSource = source
+      gpuRecoveryCount += 1
+      let videoId = stringProperty("vid")
+      var paused: Int32 = 0
+      _ = mpv_get_property(handle, "pause", MPV_FORMAT_FLAG, &paused)
+      NSLog("VideoOutput: rebuilding failed iOS GPU renderer (attempt %d)", gpuRecoveryCount)
+      currentDolbyVisionFrame = nil
+      dolbyVisionRejectionReason = nil
+      releasePictureInPictureRenderContext?()
+      texture = nil
+      currentSize = .zero
+      createTexture(hardware: enableHardwareAcceleration)
+      if let videoId = videoId, videoId != "no" {
+        _ = mpv_set_property_string(handle, "vid", videoId)
+      }
+      _ = mpv_set_property(handle, "pause", MPV_FORMAT_FLAG, &paused)
+      return true
     }
 
     private func stringProperty(_ name: String) -> String? {

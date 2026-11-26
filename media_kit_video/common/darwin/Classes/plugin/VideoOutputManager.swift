@@ -30,6 +30,11 @@ public class VideoOutputManager: NSObject {
   #if os(iOS)
     func hdrState(handle: Int64) -> [String: Any]? { videoOutputs[handle]?.hdrState }
 
+    func probeGpuRecovery(handle: Int64, completion: @escaping (Bool) -> Void) {
+      guard let output = videoOutputs[handle] else { completion(false); return }
+      output.probeGpuRecovery(completion: completion)
+    }
+
     func renderStats(handle: Int64, reset: Bool, completion: @escaping ([String: Any]) -> Void) {
       guard let output = videoOutputs[handle] else { completion([:]); return }
       output.renderStats(reset: reset, completion: completion)

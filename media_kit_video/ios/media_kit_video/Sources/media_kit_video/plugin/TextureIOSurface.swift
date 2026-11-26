@@ -31,6 +31,7 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
   private var renderContext: OpaquePointer?
   private var reportedRenderFailure = false
   private var reportedAllocationFailure = false
+  private(set) var deviceFailed = false
   /// AVKit keeps the composited HDR targets it is still presenting. Allow for
   /// those holders, so the inline renderer is not starved of a free target.
   var retainsPictureInPictureFrames = false
@@ -166,6 +167,7 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
       }
     }
     guard status >= 0, let video = decodedPictureInPictureFrame(dequeue: false).pixel else {
+      if status == MPV_ERROR_VO_INIT_FAILED.rawValue { deviceFailed = true }
       if status < 0, !reportedRenderFailure {
         reportedRenderFailure = true
         NSLog("TextureIOSurface: mpv overlay render failed (%d)", status)
@@ -354,6 +356,7 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
       return mpv_render_context_render(renderContext, &params)
     }
     guard status >= 0 else {
+      if status == MPV_ERROR_VO_INIT_FAILED.rawValue { deviceFailed = true }
       if !reportedRenderFailure {
         reportedRenderFailure = true
         NSLog("TextureIOSurface: mpv render failed (%d)", status)
@@ -404,5 +407,53 @@ final class TextureIOSurface: NSObject, IOSVideoFrameTexture {
     frameLock.lock()
     defer { frameLock.unlock() }
     return currentFrame.map { Unmanaged.passRetained($0) }
+  }
+
+  func probeDeviceFailure() -> Bool {
+    guard ProcessInfo.processInfo.environment["BOTA_IOS_RENDER_PROBE"] == "1" else { return false }
+    deviceFailed = true
+    return true
+  }
+
+  /// Explicit probe only: sample the already-rendered buffer numerically.
+  /// No screenshot or image is exported, and ordinary playback never calls it.
+  func diagnosticFrameSummary() -> [String: Any] {
+    guard ProcessInfo.processInfo.environment["BOTA_IOS_RENDER_PROBE"] == "1" else { return [:] }
+    frameLock.lock()
+    let frame = currentFrame
+    frameLock.unlock()
+    guard let frame = frame else { return ["hasFrame": false] }
+    let format = CVPixelBufferGetPixelFormatType(frame)
+    let w = CVPixelBufferGetWidth(frame), h = CVPixelBufferGetHeight(frame)
+    var result: [String: Any] = ["hasFrame": true, "width": w, "height": h, "pixelFormat": format]
+    guard format == kCVPixelFormatType_32BGRA || format == kCVPixelFormatType_ARGB2101010LEPacked,
+      CVPixelBufferLockBaseAddress(frame, .readOnly) == kCVReturnSuccess else { return result }
+    defer { CVPixelBufferUnlockBaseAddress(frame, .readOnly) }
+    guard let address = CVPixelBufferGetBaseAddress(frame) else { return result }
+    let stride = CVPixelBufferGetBytesPerRow(frame)
+    var total = 0.0, minimum = 1.0, maximum = 0.0, count = 0
+    for row in 0..<16 {
+      let y = min(h - 1, (2 * row + 1) * h / 32)
+      for col in 0..<16 {
+        let x = min(w - 1, (2 * col + 1) * w / 32)
+        let p = address.advanced(by: y * stride + 4 * x)
+        let value: Double
+        if format == kCVPixelFormatType_32BGRA {
+          let bytes = p.assumingMemoryBound(to: UInt8.self)
+          value = (Double(bytes[0]) + Double(bytes[1]) + Double(bytes[2])) / (3 * 255)
+        } else {
+          let word = p.load(as: UInt32.self)
+          value = Double((word & 1023) + ((word >> 10) & 1023) + ((word >> 20) & 1023)) / (3 * 1023)
+        }
+        total += value
+        minimum = min(minimum, value)
+        maximum = max(maximum, value)
+        count += 1
+      }
+    }
+    result["meanCodeValue"] = total / Double(count)
+    result["minCodeValue"] = minimum
+    result["maxCodeValue"] = maximum
+    return result
   }
 }

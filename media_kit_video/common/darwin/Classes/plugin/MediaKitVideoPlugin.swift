@@ -85,6 +85,14 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
           return
         }
         videoOutputManager.renderStats(handle: handle, reset: args["reset"] as? Bool ?? false) { result($0) }
+      case "VideoOutputManager.ProbeGpuRecovery":
+        guard ProcessInfo.processInfo.environment["BOTA_IOS_RENDER_PROBE"] == "1",
+          let args = call.arguments as? [String: Any],
+          let value = args["handle"] as? String, let handle = Int64(value) else {
+          result(false)
+          return
+        }
+        videoOutputManager.probeGpuRecovery(handle: handle) { result($0) }
       case "VideoOutputManager.GetHdrState":
         guard let args = call.arguments as? [String: Any],
           let value = args["handle"] as? String, let handle = Int64(value) else {
