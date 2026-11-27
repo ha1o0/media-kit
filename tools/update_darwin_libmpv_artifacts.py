@@ -16,6 +16,9 @@ DEFAULT_REPO = "ha1o0/libmpv-darwin-build"
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
 REPO = re.compile(r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+")
 DIGEST = re.compile(r"sha256:([a-f0-9]{64})")
+FRAMEWORK = r"[A-Za-z0-9_-]+"
+TARGETS = r"^let libmpvTargets = \[(?s:.*?)^\]"
+CHECKSUMS = r"^let libmpvChecksums = \[(?s:.*?)^\]"
 
 
 def validate_selection(platform, tag, repo):
@@ -70,6 +73,42 @@ def package_dir(root, platform, variant):
     return root / "libs" / platform / package / platform, package
 
 
+def swift_pins(text, name):
+    blocks = []
+    for pattern in (TARGETS, CHECKSUMS):
+        matches = list(re.finditer(pattern, text, re.MULTILINE))
+        if len(matches) != 1:
+            raise ValueError(f"Unexpected SwiftPM pin block for {name}")
+        blocks.append(matches[0].group())
+    names = re.findall(rf'"({FRAMEWORK})"', blocks[0])
+    entries = re.findall(rf'^([ \t]*)"({FRAMEWORK})": "([a-f0-9]{{64}})"',
+                         blocks[1], re.MULTILINE)
+    keys = [framework for _, framework, _ in entries]
+    if (not names or "Mpv" not in names or len(set(names)) != len(names) or
+            not keys or "Mpv" not in keys or len(set(keys)) != len(keys)):
+        raise ValueError(f"Unexpected SwiftPM framework list for {name}")
+    return blocks, names, entries
+
+
+def released_frameworks(assets, stem, required, name):
+    pattern = re.compile(rf"{re.escape(stem)}_({FRAMEWORK})\.zip")
+    frameworks = {}
+    for asset in assets:
+        if not asset.startswith(stem + "_") or not asset.endswith(".zip"):
+            continue
+        match = pattern.fullmatch(asset)
+        if not match:
+            raise ValueError(f"Unexpected framework asset: {asset}")
+        frameworks[match[1]] = checksum(assets, asset)
+    if ("Mpv" not in frameworks or
+            not set(required).issubset(frameworks)):
+        missing = set(required) - frameworks.keys()
+        raise ValueError(f"Missing uploaded SwiftPM frameworks for {name}: {sorted(missing)}")
+    if len({framework.lower() for framework in frameworks}) != len(frameworks):
+        raise ValueError(f"Conflicting framework asset names for {name}")
+    return {framework: frameworks[framework] for framework in sorted(frameworks)}
+
+
 def plan(root, platform, variant, tag, repo, mode, release):
     validate_selection(platform, tag, repo)
     assets = release_assets(release, tag)
@@ -82,6 +121,9 @@ def plan(root, platform, variant, tag, repo, mode, release):
         make = package / "Makefile"
         swift = package / name / "Package.swift"
         old_make, old_swift = (path.read_bytes().decode() for path in (make, swift))
+        blocks, targets, entries = swift_pins(old_swift, name)
+        required = set(targets) | {framework for _, framework, _ in entries}
+        frameworks = released_frameworks(assets, stem, required, name)
         make_text = replace_once(r"^MPV_XCFRAMEWORKS_VERSION=[^\r\n]+", old_make,
                                  f"MPV_XCFRAMEWORKS_VERSION={tag}")
         make_text = replace_once(r"^MPV_XCFRAMEWORKS_SHA256SUM=[^\r\n]+", make_text,
@@ -93,18 +135,28 @@ def plan(root, platform, variant, tag, repo, mode, release):
             rf"https://github\.com/[^\s/]+/[^\s/]+/releases/download/[^\s]+_{platform}-universal-{item}-[^\s]+\.tar\.gz",
             make_text, make_url,
         )
-        if make_text != old_make and f"MPV_XCFRAMEWORKS_VERSION={tag}" in old_make.splitlines():
+        same_version = f"MPV_XCFRAMEWORKS_VERSION={tag}" in old_make.splitlines()
+        if make_text != old_make and same_version:
             raise ValueError(f"{name}: same version changed origin or checksum; use a new immutable tag")
         swift_text = replace_once(r'^let libmpvArtifactBase = "[^"\r\n]+"', old_swift,
                                   f'let libmpvArtifactBase = "{release_base}/{tag}/{stem}"')
-        entries = re.findall(r'^([ \t]*)"([A-Za-z0-9-]+)": "[a-f0-9]{64}"', old_swift, re.MULTILINE)
-        names = [framework for _, framework in entries]
-        if not names or len(set(names)) != len(names) or "Mpv" not in names:
-            raise ValueError(f"Unexpected SwiftPM framework list for {name}")
-        for indent, framework in entries:
-            sha = checksum(assets, f"{stem}_{framework}.zip")
-            swift_text = replace_once(rf'^[ \t]*"{re.escape(framework)}": "[a-f0-9]{{64}}"',
-                                      swift_text, f'{indent}"{framework}": "{sha}"')
+        old_checksums = {framework: sha for _, framework, sha in entries}
+        if same_version and (set(targets) != frameworks.keys() or
+                             old_checksums != frameworks or swift_text != old_swift):
+            raise ValueError(f"{name}: same version changed SwiftPM assets; use a new immutable tag")
+        if set(targets) == frameworks.keys() and old_checksums.keys() == frameworks.keys():
+            checksums = blocks[1]
+            for indent, framework, _ in entries:
+                checksums = replace_once(rf'^[ \t]*"{re.escape(framework)}": "[a-f0-9]{{64}}"',
+                                          checksums, f'{indent}"{framework}": "{frameworks[framework]}"')
+            swift_text = replace_once(CHECKSUMS, swift_text, checksums)
+        else:
+            target_list = "let libmpvTargets = [\n" + ",\n".join(
+                f'    "{framework}"' for framework in frameworks) + "\n]"
+            checksum_list = "let libmpvChecksums = [\n" + ",\n".join(
+                f'    "{framework}": "{sha}"' for framework, sha in frameworks.items()) + "\n]"
+            swift_text = replace_once(TARGETS, swift_text, target_list)
+            swift_text = replace_once(CHECKSUMS, swift_text, checksum_list)
         for path, before, after in ((make, old_make, make_text), (swift, old_swift, swift_text)):
             if before != after:
                 changes[path] = (before.encode(), after.encode())
