@@ -24,15 +24,26 @@ final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback
     private boolean mirror;
     private final Runnable onDispose;
     final boolean fullscreen;
+    final boolean pictureInPicture;
     private final VideoOutput output;
     private final DisplayManager displays;
     private boolean available;
     private boolean disposed;
+    // SurfaceView retains a Java Surface wrapper while its native buffers can
+    // be replaced by visibility/size changes during PiP transitions.
+    long surfaceGeneration;
+    long subtitleGeneration;
 
     HdrVideoPlatformView(Context context, VideoOutput output, boolean fullscreen, Map<?, ?> layout, Runnable onDispose) {
+        this(context, output, fullscreen, false, layout, onDispose);
+    }
+
+    HdrVideoPlatformView(Context context, VideoOutput output, boolean fullscreen,
+                         boolean pictureInPicture, Map<?, ?> layout, Runnable onDispose) {
         this.output = output;
         this.onDispose = onDispose;
         this.fullscreen = fullscreen;
+        this.pictureInPicture = pictureInPicture;
         displays = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
         view = new SurfaceView(context) {
             @Override protected void onWindowVisibilityChanged(int visibility) {
@@ -55,6 +66,7 @@ final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback
         container.addView(subtitles, new FrameLayout.LayoutParams(1, 1));
         subtitles.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override public void surfaceCreated(@NonNull SurfaceHolder holder) {
+                subtitleGeneration++;
                 // GPU-rendered playback also owns this view. Publish a clear
                 // first buffer so an unused subtitle plane cannot cover it.
                 android.graphics.Canvas canvas = null;
@@ -69,7 +81,10 @@ final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback
                 }
                 changed();
             }
-            @Override public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int w, int h) { changed(); }
+            @Override public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int w, int h) {
+                subtitleGeneration++;
+                changed();
+            }
             @Override public void surfaceDestroyed(@NonNull SurfaceHolder holder) { changed(); }
         });
         container.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> layoutVideo());
@@ -120,9 +135,18 @@ final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback
         return Double.isFinite(number) ? number : fallback;
     }
 
-    private void layoutVideo() {
+    void layoutVideo() {
         int cw = container.getWidth(), ch = container.getHeight();
         if (cw <= 0 || ch <= 0) return;
+        if (pictureInPicture) {
+            // PiP's permitted aspect ratios are narrower than some videos.
+            // Fit the original frame rather than stretching its SurfaceView.
+            double aspect = output.aspectRatio();
+            width = Math.min(1, ch * aspect / cw);
+            height = Math.min(1, cw / aspect / ch);
+            x = (1 - width) / 2;
+            y = (1 - height) / 2;
+        }
         int w = Math.max(1, (int) Math.round(width * cw));
         int h = Math.max(1, (int) Math.round(height * ch));
         boolean quarterTurn = rotation == 90 || rotation == 270;
@@ -146,10 +170,12 @@ final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback
         subtitles.setScaleX(mirror ? -1 : 1);
     }
     @Override public void surfaceCreated(@NonNull SurfaceHolder holder) {
+        surfaceGeneration++;
         available = true;
         changed();
     }
     @Override public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int w, int h) {
+        surfaceGeneration++;
         available = true;
         changed();
     }
@@ -162,6 +188,7 @@ final class HdrVideoPlatformView implements PlatformView, SurfaceHolder.Callback
     @Override public void onDisplayChanged(int id) { changed(); }
 
     @Override public void dispose() {
+        if (disposed) return;
         disposed = true;
         if (displays != null) displays.unregisterDisplayListener(this);
         available = false;

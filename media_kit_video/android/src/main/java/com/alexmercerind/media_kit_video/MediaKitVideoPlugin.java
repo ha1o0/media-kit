@@ -52,6 +52,28 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
     // app runs a single engine.
     private static final HashMap<Integer, HdrVideoPlatformView> nativeHosts = new HashMap<>();
     private static NativeVideoHostListener nativeHostListener;
+    private static MediaKitVideoPlugin activePlugin;
+
+    /** A video-only host sharing the existing mpv output; owns no decoder. */
+    public static final class PictureInPictureHost {
+        private final HdrVideoPlatformView view;
+        private final VideoOutput output;
+
+        private PictureInPictureHost(Context context, VideoOutput output) {
+            this.output = output;
+            view = new HdrVideoPlatformView(context, output, true, true,
+                    java.util.Collections.emptyMap(), () -> {});
+        }
+
+        public android.view.View getView() { return view.getView(); }
+        public boolean isReady() { return output.available() && view.eligible(); }
+        public void dispose() { view.dispose(); }
+    }
+
+    public static PictureInPictureHost createPictureInPictureHost(Context context, long handle) {
+        VideoOutput output = activePlugin == null ? null : activePlugin.videoOutputManager.findByHandle(handle);
+        return output == null || !output.available() ? null : new PictureInPictureHost(context, output);
+    }
 
     /** Resolves a live platform view id reported to Dart, or returns null. */
     public static NativeVideoHost nativeVideoHost(int viewId) {
@@ -82,6 +104,7 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
         applicationContext = flutterPluginBinding.getApplicationContext();
         codecQueries = java.util.concurrent.Executors.newSingleThreadExecutor();
         videoOutputManager = new VideoOutputManager(flutterPluginBinding.getTextureRegistry());
+        activePlugin = this;
         flutterPluginBinding.getPlatformViewRegistry().registerViewFactory("media_kit_video/hdr",
             new PlatformViewFactory(StandardMessageCodec.INSTANCE) {
                 @Override public PlatformView create(Context context, int id, Object args) {
@@ -117,13 +140,14 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
             }
             case "VideoOutputManager.Create": {
                 final long handle = Long.parseLong(call.argument("handle"));
-                videoOutputManager.create(handle, (id, wid, subtitleWid, width, height, nativeSurface, hdrCapabilities) -> channel.invokeMethod("VideoOutput.Resize", new HashMap<String, Object>() {{
+                videoOutputManager.create(handle, (id, wid, subtitleWid, width, height, nativeSurface, hdrCapabilities, pictureInPicture) -> channel.invokeMethod("VideoOutput.Resize", new HashMap<String, Object>() {{
                     put("handle", handle);
                     put("id", id);
                     put("wid", wid);
                     put("subtitleWid", subtitleWid);
                     put("nativeSurface", nativeSurface);
                     put("hdrCapabilities", hdrCapabilities);
+                    put("pictureInPicture", pictureInPicture);
                     put("rect", new HashMap<String, Object>() {{
                         put("left", 0);
                         put("top", 0);
@@ -194,6 +218,7 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
 
     @Override
     public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
+        if (activePlugin == this) activePlugin = null;
         if (codecQueries != null) codecQueries.shutdownNow();
         channel.setMethodCallHandler(null);
         backdropChannel = null;

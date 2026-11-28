@@ -44,6 +44,8 @@ public class VideoOutputManager {
         return null;
     }
 
+    VideoOutput findByHandle(long handle) { return videoOutputs.get(handle); }
+
     public void dispose(long handle) {
         synchronized (lock) {
             Log.i(TAG, String.format(Locale.ENGLISH, "com.alexmercerind.media_kit_video.VideoOutputManager.dispose: %d", handle));

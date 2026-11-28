@@ -60,9 +60,16 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
     private int selectedCapabilities;
     private int selectedWidth;
     private int selectedHeight;
+    private long producerGeneration;
+    private long selectedGeneration;
+    private long selectedSubtitleGeneration;
     private boolean disposed;
 
     long textureId() { return surfaceProducer.id(); }
+    double aspectRatio() {
+        return (double) Math.max(1, surfaceProducer.getWidth()) / Math.max(1, surfaceProducer.getHeight());
+    }
+    boolean available() { return !disposed && !closing; }
 
     void attach(HdrVideoPlatformView view) {
         nativeViews.add(view);
@@ -79,7 +86,10 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
         if (disposed || closing) return;
         HdrVideoPlatformView selected = null;
         for (HdrVideoPlatformView view : nativeViews) {
-            if (view.eligible() && (selected == null || !selected.fullscreen || view.fullscreen)) {
+            if (view.eligible() && (selected == null
+                    || (view.pictureInPicture && !selected.pictureInPicture)
+                    || (view.pictureInPicture == selected.pictureInPicture
+                        && (!selected.fullscreen || view.fullscreen)))) {
                 selected = view;
             }
         }
@@ -96,13 +106,19 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
         int width = surfaceProducer.getWidth();
         int height = surfaceProducer.getHeight();
         Surface subtitles = selected == null ? null : selected.subtitleSurface();
+        final long generation = selected == null ? producerGeneration : selected.surfaceGeneration;
+        final long subtitleGeneration = selected == null ? 0 : selected.subtitleGeneration;
         if (surface == selectedSurface && capabilities == selectedCapabilities
                 && subtitles == selectedSubtitleSurface
+                && generation == selectedGeneration && subtitleGeneration == selectedSubtitleGeneration
                 && width == selectedWidth && height == selectedHeight) return;
         selectedWidth = width;
         selectedHeight = height;
-        final boolean videoChanged = surface != selectedSurface;
-        final boolean subtitleChanged = subtitles != selectedSubtitleSurface;
+        final boolean videoChanged = surface != selectedSurface || generation != selectedGeneration;
+        final boolean subtitleChanged = subtitles != selectedSubtitleSurface
+                || subtitleGeneration != selectedSubtitleGeneration;
+        selectedGeneration = generation;
+        selectedSubtitleGeneration = subtitleGeneration;
         selectedSurface = surface;
         selectedCapabilities = capabilities;
         backdrop.setSource(surface != null && surface.isValid() ? surface : null, width, height);
@@ -115,7 +131,8 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
             wid = surface != null && surface.isValid() ? newGlobalObjectRef(surface) : 0;
         id = surfaceProducer.id();
         textureUpdateCallback.onTextureUpdate(id, wid, subtitleWid, surfaceProducer.getWidth(),
-                surfaceProducer.getHeight(), selected != null, capabilities);
+                surfaceProducer.getHeight(), selected != null, capabilities,
+                selected != null && selected.pictureInPicture);
         if (oldWid != 0 && oldWid != wid)
             handler.postDelayed(() -> deleteGlobalObjectRef(oldWid), 5000);
         if (oldSubtitleWid != 0 && oldSubtitleWid != subtitleWid)
@@ -175,6 +192,7 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
                 surfaceProducer.setSize(width, height);
                 for (HdrVideoPlatformView view : nativeViews) {
                     view.view.getHolder().setFixedSize(width, height);
+                    if (view.pictureInPicture) view.layoutVideo();
                 }
                 onSurfaceAvailable();
             } catch (Throwable e) {
@@ -188,6 +206,7 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
         synchronized (lock) {
             Log.i(TAG, "onSurfaceAvailable");
             if (disposed) return;
+            producerGeneration++;
             selectNativeSurface();
         }
     }
@@ -197,7 +216,7 @@ public class VideoOutput implements TextureRegistry.SurfaceProducer.Callback {
         synchronized (lock) {
             Log.i(TAG, "onSurfaceCleanup");
             if (!disposed && presentingView != null) return;
-            textureUpdateCallback.onTextureUpdate(id, 0, 0, surfaceProducer.getWidth(), surfaceProducer.getHeight(), false, 0);
+            textureUpdateCallback.onTextureUpdate(id, 0, 0, surfaceProducer.getWidth(), surfaceProducer.getHeight(), false, 0, false);
             selectedSurface = null;
             selectedSubtitleSurface = null;
             backdrop.setSource(null, 0, 0);

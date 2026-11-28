@@ -62,6 +62,7 @@ class AndroidVideoController extends PlatformVideoController {
   bool _nativeHdrSupported = false;
   int _surfaceHdrCapabilities = 0;
   bool _nativeSurfaceSelected = false;
+  bool _pictureInPictureSurface = false;
   bool _disposed = false;
   bool _observesTarget = false;
   bool _nativeSurfaceFailed = false;
@@ -93,7 +94,8 @@ class AndroidVideoController extends PlatformVideoController {
 
   bool get _requestedSurfaceReady =>
       (wid.value ?? 0) != 0 &&
-      _nativeSurfaceSelected == androidNativeSurface.value &&
+      _nativeSurfaceSelected ==
+          (androidNativeSurface.value || _pictureInPictureSurface) &&
       (!androidNativeSurface.value || !_directAllowed || _subtitleWid != 0);
 
   @override
@@ -517,16 +519,22 @@ class AndroidVideoController extends PlatformVideoController {
         asynchronous: true,
         isCurrent: () => !stale(),
       );
-      // Instead of seeking to the start (Duration.zero), seek to the current playback position
-      // without jumping the user to the start of the media.
+      // Repaint seekable files at their current position after replacing VO.
+      // A live stream must continue from its decoder; seeking can flush its
+      // buffered packets or fail/reopen the connection during a PiP handoff.
       if (stale()) return;
       _appliedSurfaceKey = surfaceKey;
-      final currentPosition = player.state.position;
-      await platform.command([
-        'seek',
-        '${currentPosition.inMilliseconds / 1000}',
-        'absolute+exact'
-      ], waitForInitialization: false);
+      final seekable =
+          await platform.getProperty('seekable', waitForInitialization: false);
+      if (stale()) return;
+      if (seekable == 'yes') {
+        final currentPosition = player.state.position;
+        await platform.command([
+          'seek',
+          '${currentPosition.inMilliseconds / 1000}',
+          'absolute+exact'
+        ], waitForInitialization: false);
+      }
       if (direct) nativeHdrActive.value = true;
       if (direct && _backdropTransfer != _directTransfer) {
         _backdropTransfer = _directTransfer;
@@ -835,6 +843,8 @@ class AndroidVideoController extends PlatformVideoController {
                 }
                 final caps = call.arguments['hdrCapabilities'] as int? ?? 0;
                 final native = call.arguments['nativeSurface'] == true;
+                final pictureInPicture =
+                    call.arguments['pictureInPicture'] == true;
                 final subtitleWid = call.arguments['subtitleWid'] as int? ?? 0;
                 final changed = caps != controller._surfaceHdrCapabilities ||
                     native != controller._nativeSurfaceSelected ||
@@ -842,6 +852,7 @@ class AndroidVideoController extends PlatformVideoController {
                 controller._subtitleWid = subtitleWid;
                 controller._surfaceHdrCapabilities = caps;
                 controller._nativeSurfaceSelected = native;
+                controller._pictureInPictureSurface = pictureInPicture;
                 controller.rect.value = rect;
                 controller.id.value = id;
                 if (wid == controller.wid.value && changed) {
